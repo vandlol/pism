@@ -32,6 +32,26 @@ pism kill 3f9a           # done
 transcript unambiguously — topics stay correct even across symlinks or when two
 sessions share a directory.
 
+### Session names
+
+Every session is given a memorable `adjective-noun` name (e.g. `calm-otter`) when
+it's created, shown in the `NAME` column of `pism ls`. **Anywhere a command takes
+an `<id>`, you can use the name instead** — `pism attach calm-otter`,
+`pism kill calm-otter`. Names are matched case-insensitively; ids (full or
+prefix) still work too.
+
+Rename a session to something meaningful:
+
+```sh
+pism name calm-otter api        # rename by current name
+pism name 3f9a api              # ...or by id prefix
+pism srv name calm-otter build  # rename a session on host 'srv'
+```
+
+Names are lowercase, `≤31` chars, `[a-z0-9_-]`, and must be unique among your
+sessions. They make cross-host switching legible — you jump to `mac:api`, not
+`mac:e4d5c6b7`.
+
 By default `new` waits up to 30s for pi to come up before attaching; tune it per
 run with `-w/--wait` (`pism new ~/proj -w 5m`, `-w 0` waits forever) or
 permanently via `pism config ready-timeout`.
@@ -112,18 +132,18 @@ pism ls --all --connect-timeout 5    # bound the per-host reachability probe
 ```
 
 ```
-HOST   ID        S     TOPIC                      DIR          AGE
-local  3f9a1c2b  live  design a caching layer     ~/proj/api   2h
-local  7c1d0e44  live  fix the flaky auth test    ~/proj/web   15m
-mac    a0b2f931  live  port the UI to resource…   ~/burger     1d
-srv    e4d5c6b7  dead  migrate the billing schema ~/billing    3d
+HOST   NAME          ID        S     TOPIC                      DIR          AGE
+local  calm-otter    3f9a1c2b  live  design a caching layer     ~/proj/api   2h
+local  brave-falcon  7c1d0e44  live  fix the flaky auth test    ~/proj/web   15m
+mac    api           a0b2f931  live  port the UI to resource…   ~/burger     1d
+srv    zippy-rabbit  e4d5c6b7  dead  migrate the billing schema ~/billing    3d
 ```
 
 Unreachable hosts and hosts without pism are noted on stderr and skipped (never
 failed). Under the hood each host runs `pism ls --porcelain` (a stable
-tab-separated `id⇥state⇥age⇥dir⇥topic` format you can also script against
-directly). Selection uses the same `--include`/`--exclude` globs as
-`update --all`.
+tab-separated `id⇥name⇥state⇥age⇥dir⇥topic` format you can also script against
+directly; older 5-field output without a name is still accepted). Selection uses
+the same `--include`/`--exclude` globs as `update --all`.
 
 > Want to *switch* between hosts, not just list them? See
 > [Switching sessions](#switching-sessions) — `pism attach --all` makes
@@ -143,6 +163,7 @@ pism ls [--all] [--porcelain]         List sessions with topic + liveness
                                       (--all aggregates every ssh host; see below)
 pism attach <id>                      Re-attach (id prefixes work: pism a 3f9a)
 pism kill <id> [id...]                Terminate session(s)
+pism name <id> <new-name>             Rename a session (human-friendly label)
 pism gc                               Drop metadata for dead sessions
 pism topic <id>                       Print a session's topic (for scripts)
 pism logs <id>                        Print a session's holder log (diagnostics)
@@ -215,8 +236,9 @@ pism mac attach 7c1d --all           # start on host 'mac', switch across hosts
 pism attach --all --include 'prod-*' # limit the universe to matching hosts
 ```
 
-The universe is local-first, then ssh-config host order, newest-first within each
-host, wrapping around. It's rebuilt on every switch (a quick per-host
+Each hop shows the target's name (`[switching to mac:api]`) so you always know
+where you landed. The universe is local-first, then ssh-config host order,
+newest-first within each host, wrapping around. It's rebuilt on every switch (a quick per-host
 `ls --porcelain` poll), so newly-created and newly-dead sessions are reflected;
 unreachable hosts are skipped. Crossing to a remote session opens it through the
 same [ssh proxy](#remote-hosts-over-ssh) as a remote attach, so keys stay local.

@@ -8,18 +8,20 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
 // Meta is the on-disk descriptor for one live (or recently-live) session.
 type Meta struct {
-	ID       string    `json:"id"`        // == pi --session-id (uuid v4)
-	PID      int       `json:"pid"`       // holder process id
-	Cmd      string    `json:"cmd"`       // e.g. "pi"
-	Args     []string  `json:"args"`      // extra args passed to pi
-	Cwd      string    `json:"cwd"`       // working dir pi runs in
-	Endpoint string    `json:"endpoint"`  // unix socket path or \\.\pipe\ name
-	Token    string    `json:"token"`     // attach auth token (hex)
+	ID       string    `json:"id"`       // == pi --session-id (uuid v4)
+	Name     string    `json:"name"`     // human-recognizable label (adjective-noun)
+	PID      int       `json:"pid"`      // holder process id
+	Cmd      string    `json:"cmd"`      // e.g. "pi"
+	Args     []string  `json:"args"`     // extra args passed to pi
+	Cwd      string    `json:"cwd"`      // working dir pi runs in
+	Endpoint string    `json:"endpoint"` // unix socket path or \\.\pipe\ name
+	Token    string    `json:"token"`    // attach auth token (hex)
 	Created  time.Time `json:"created"`
 }
 
@@ -45,34 +47,48 @@ func (m *Meta) Save() error {
 	return os.Rename(tmp, p)
 }
 
-// Load reads metadata for a full or partial id.
-func Load(idOrPrefix string) (*Meta, error) {
-	// exact first
-	if b, err := os.ReadFile(metaPath(idOrPrefix)); err == nil {
+// Load reads metadata for a session identified by (in priority order) an exact
+// id, an exact name, or an id prefix. Name match is case-insensitive.
+func Load(ref string) (*Meta, error) {
+	// exact id first
+	if b, err := os.ReadFile(metaPath(ref)); err == nil {
 		var m Meta
 		if err := json.Unmarshal(b, &m); err != nil {
 			return nil, err
 		}
 		return &m, nil
 	}
-	// prefix match
 	all, err := List()
 	if err != nil {
 		return nil, err
 	}
+	// exact name (case-insensitive) next
+	var nameHits []*Meta
+	for _, m := range all {
+		if m.Name != "" && strings.EqualFold(m.Name, ref) {
+			nameHits = append(nameHits, m)
+		}
+	}
+	if len(nameHits) == 1 {
+		return nameHits[0], nil
+	}
+	if len(nameHits) > 1 {
+		return nil, fmt.Errorf("ambiguous name %q matches %d sessions", ref, len(nameHits))
+	}
+	// id prefix
 	var hits []*Meta
 	for _, m := range all {
-		if len(idOrPrefix) > 0 && len(m.ID) >= len(idOrPrefix) && m.ID[:len(idOrPrefix)] == idOrPrefix {
+		if len(ref) > 0 && len(m.ID) >= len(ref) && m.ID[:len(ref)] == ref {
 			hits = append(hits, m)
 		}
 	}
 	switch len(hits) {
 	case 0:
-		return nil, fmt.Errorf("no session matching %q", idOrPrefix)
+		return nil, fmt.Errorf("no session matching %q", ref)
 	case 1:
 		return hits[0], nil
 	default:
-		return nil, fmt.Errorf("ambiguous id %q matches %d sessions", idOrPrefix, len(hits))
+		return nil, fmt.Errorf("ambiguous id %q matches %d sessions", ref, len(hits))
 	}
 }
 

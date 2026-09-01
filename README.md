@@ -9,16 +9,20 @@ runs on **Linux, macOS, and Windows**.
 
 ![pism demo](assets/demo.gif)
 
-The best part: pism lists your sessions by their **topic** — the first thing you
-asked pi — so you always know what's running where.
+The best part: every session gets a **memorable name** and is listed by its
+**topic** — the first thing you asked pi — so you always know what's running
+where, and switching between them is about names, not cryptic ids.
 
 ```
 $ pism ls
-ID        S     TOPIC                                DIR                 AGE
-3f9a1c2b  live  design a caching layer for the API   ~/proj/api          2h
-7c1d0e44  live  fix the flaky auth test              ~/proj/web          15m
-a0b2f931  dead  migrate the billing schema           ~/proj/billing      1d
+NAME           ID        S     TOPIC                                DIR             AGE
+calm-otter     3f9a1c2b  live  design a caching layer for the API   ~/proj/api      2h
+brave-falcon   7c1d0e44  live  fix the flaky auth test              ~/proj/web      15m
+zippy-rabbit   a0b2f931  dead  migrate the billing schema           ~/proj/billing  1d
 ```
+
+Use the name anywhere you'd use an id — `pism attach calm-otter` — and rename it
+to something meaningful with `pism name calm-otter api`.
 
 ---
 
@@ -71,6 +75,9 @@ Other install options (manual download, remote hosts, build from source) live in
 
 ## What else it does
 
+- **Memorable names** — every session gets an `adjective-noun` label
+  (`calm-otter`) you can attach/kill/rename by, so cross-host switching never
+  leaves you guessing which session is which.
 - **Sessions by topic** — `pism ls` reads each pi transcript and shows what the
   conversation is actually about, plus whether it's live or dead.
 - **Detach & re-attach** — `Ctrl-\` drops out without stopping pi; re-attach any

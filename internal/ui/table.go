@@ -17,7 +17,7 @@ func Render(w io.Writer, rows []manager.Row) {
 		fmt.Fprintln(w, "no sessions. start one with:  pism new")
 		return
 	}
-	headers := []string{"ID", "S", "TOPIC", "DIR", "AGE"}
+	headers := []string{"NAME", "ID", "S", "TOPIC", "DIR", "AGE"}
 	data := make([][]string, 0, len(rows))
 	for _, r := range rows {
 		state := "dead"
@@ -25,6 +25,7 @@ func Render(w io.Writer, rows []manager.Row) {
 			state = "live"
 		}
 		data = append(data, []string{
+			nameOr(r.Meta.Name, r.Meta.ID),
 			shortID(r.Meta.ID),
 			state,
 			r.Topic,
@@ -63,8 +64,9 @@ func RenderPorcelain(w io.Writer, rows []manager.Row) {
 		if r.Alive {
 			state = "live"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n",
 			r.Meta.ID,
+			nameOr(r.Meta.Name, r.Meta.ID),
 			state,
 			int(r.Age.Seconds()),
 			abbrevHome(r.Meta.Cwd),
@@ -76,6 +78,7 @@ func RenderPorcelain(w io.Writer, rows []manager.Row) {
 // MultiRow is a host-tagged session row for the aggregated `ls --all` view.
 type MultiRow struct {
 	Host  string
+	Name  string
 	ID    string // full id
 	State string // "live" | "dead"
 	Topic string
@@ -90,11 +93,12 @@ func RenderMulti(w io.Writer, rows []MultiRow) {
 		fmt.Fprintln(w, "no sessions on any host. start one with:  pism new  (or: pism <host> new)")
 		return
 	}
-	headers := []string{"HOST", "ID", "S", "TOPIC", "DIR", "AGE"}
+	headers := []string{"HOST", "NAME", "ID", "S", "TOPIC", "DIR", "AGE"}
 	data := make([][]string, 0, len(rows))
 	for _, r := range rows {
 		data = append(data, []string{
 			r.Host,
+			nameOr(r.Name, r.ID),
 			shortID(r.ID),
 			r.State,
 			r.Topic,
@@ -117,6 +121,15 @@ func RenderMulti(w io.Writer, rows []MultiRow) {
 	for _, row := range data {
 		printRow(w, row, widths)
 	}
+}
+
+// nameOr returns the name, or a shortened id when the session has no name
+// (e.g. created by an older pism).
+func nameOr(name, id string) string {
+	if name != "" {
+		return name
+	}
+	return shortID(id)
 }
 
 func flatten(s string) string {

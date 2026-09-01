@@ -204,7 +204,11 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 	if err := handshake(nc, m.Token); err != nil {
 		return OutcomeExit, err
 	}
-	return runSession(nc, short(m.ID), keys)
+	label := short(m.ID)
+	if m.Name != "" {
+		label = m.Name
+	}
+	return runSession(nc, label, keys)
 }
 
 // AttachStream connects the current terminal to a session reachable over an

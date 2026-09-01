@@ -23,6 +23,7 @@ const ringMax = 256 * 1024 // replay buffer sent to newly-attached clients
 // Config for a holder run (parsed from the hidden __holder subcommand).
 type Config struct {
 	ID        string
+	Name      string
 	Cwd       string
 	PiCmd     string
 	ExtraArgs []string
@@ -99,6 +100,7 @@ func Run(cfg Config) error {
 
 	h.meta = &session.Meta{
 		ID:       cfg.ID,
+		Name:     cfg.Name,
 		PID:      os.Getpid(),
 		Cmd:      cfg.PiCmd,
 		Args:     cfg.ExtraArgs,
