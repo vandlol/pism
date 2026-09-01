@@ -8,10 +8,12 @@
 package remote
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -145,6 +147,173 @@ func Push(host, distDir, dest, cfg string) error {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// ListConfigHosts parses concrete `Host` aliases out of an ssh config file.
+// Pattern entries (containing '*', '?' or the '!' negation) are skipped since
+// they aren't connectable targets. When cfg is "" it falls back to the user's
+// ~/.ssh/config. Order is preserved and duplicates removed.
+func ListConfigHosts(cfg string) ([]string, error) {
+	pathToCfg := cfg
+	if pathToCfg == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("locate home dir: %w", err)
+		}
+		pathToCfg = filepath.Join(home, ".ssh", "config")
+	}
+	f, err := os.Open(pathToCfg)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var hosts []string
+	seen := map[string]bool{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, rest := splitConfigLine(line)
+		if !strings.EqualFold(key, "Host") {
+			continue
+		}
+		for _, tok := range strings.Fields(rest) {
+			if strings.ContainsAny(tok, "*?!") {
+				continue // pattern, not a concrete host
+			}
+			if !seen[tok] {
+				seen[tok] = true
+				hosts = append(hosts, tok)
+			}
+		}
+	}
+	return hosts, sc.Err()
+}
+
+// splitConfigLine splits an ssh_config line into keyword and the rest of the
+// value. ssh accepts either whitespace or an '=' (optionally surrounded by
+// whitespace) between a keyword and its arguments.
+func splitConfigLine(line string) (key, rest string) {
+	i := strings.IndexAny(line, " \t=")
+	if i < 0 {
+		return line, ""
+	}
+	key = line[:i]
+	rest = strings.TrimLeft(line[i:], " \t=")
+	return key, rest
+}
+
+// MatchesAny reports whether host matches any of the glob patterns (path.Match
+// semantics: '*' and '?'). A plain host name is an exact match. An empty
+// pattern list is never a match.
+func MatchesAny(host string, patterns []string) bool {
+	for _, p := range patterns {
+		if p == host {
+			return true
+		}
+		if ok, err := path.Match(p, host); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// RunAllOptions controls fanning a single pism subcommand out across the hosts
+// in an ssh config.
+type RunAllOptions struct {
+	ConfigFile     string   // ssh config to enumerate + connect with ("" = ~/.ssh/config)
+	RemoteBin      string   // pism path on the remotes (default "pism")
+	Include        []string // glob patterns; empty = all hosts
+	Exclude        []string // glob patterns to skip
+	Sub            string   // remote pism subcommand to run (e.g. "update", "config")
+	Args           []string // args passed after the subcommand (e.g. --pre, or a config key/value)
+	ConnectTimeout int      // ssh ConnectTimeout seconds for the probe (0 = ssh default)
+	TTY            bool     // allocate a pty on each remote (unused for update/config)
+}
+
+// RunAll enumerates hosts from the ssh config, filters them by include/exclude,
+// probes each for a pism binary, and runs `pism <Sub> <Args...>` on the ones
+// that have it. Hosts that are unreachable or lack pism are skipped with a note
+// (not treated as failures). Returns a non-zero code if any host's command
+// failed. This powers both `pism update --all` and `pism config --all`.
+func RunAll(o RunAllOptions) (int, error) {
+	if o.Sub == "" {
+		return 1, fmt.Errorf("RunAll: empty subcommand")
+	}
+	hosts, err := ListConfigHosts(o.ConfigFile)
+	if err != nil {
+		return 1, fmt.Errorf("read ssh config: %w", err)
+	}
+	if len(hosts) == 0 {
+		return 0, fmt.Errorf("no hosts found in ssh config")
+	}
+
+	var targets []string
+	for _, h := range hosts {
+		if len(o.Include) > 0 && !MatchesAny(h, o.Include) {
+			continue
+		}
+		if MatchesAny(h, o.Exclude) {
+			continue
+		}
+		targets = append(targets, h)
+	}
+	if len(targets) == 0 {
+		return 0, fmt.Errorf("no hosts matched the include/exclude filters")
+	}
+
+	fmt.Fprintf(os.Stderr, "pism %s: %d host(s): %s\n", o.Sub, len(targets), strings.Join(targets, ", "))
+
+	rc := 0
+	var ran, skipped, failed int
+	for _, h := range targets {
+		has, perr := hasPism(h, o.ConfigFile, o.RemoteBin, o.ConnectTimeout)
+		if perr != nil {
+			fmt.Fprintf(os.Stderr, "  [%s] skip: unreachable over ssh\n", h)
+			skipped++
+			continue
+		}
+		if !has {
+			fmt.Fprintf(os.Stderr, "  [%s] skip: pism not installed\n", h)
+			skipped++
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "  [%s] %s…\n", h, o.Sub)
+		code, ferr := Forward(Options{Host: h, RemoteBin: o.RemoteBin, ConfigFile: o.ConfigFile, TTY: o.TTY},
+			append([]string{o.Sub}, o.Args...))
+		if ferr != nil || code != 0 {
+			fmt.Fprintf(os.Stderr, "  [%s] %s FAILED (exit %d)\n", h, o.Sub, code)
+			failed++
+			rc = 1
+			continue
+		}
+		ran++
+	}
+	fmt.Fprintf(os.Stderr, "pism %s: %d ok, %d skipped, %d failed\n", o.Sub, ran, skipped, failed)
+	return rc, nil
+}
+
+// hasPism probes a host for a usable pism binary over ssh. It uses BatchMode so
+// a host needing a password is skipped rather than hanging on a prompt.
+func hasPism(host, cfg, remoteBin string, timeout int) (bool, error) {
+	bin := remoteBin
+	if bin == "" {
+		bin = "pism"
+	}
+	args := configArgs(cfg)
+	args = append(args, "-o", "BatchMode=yes")
+	if timeout > 0 {
+		args = append(args, "-o", fmt.Sprintf("ConnectTimeout=%d", timeout))
+	}
+	args = append(args, host, "command -v "+shellQuote(bin)+" >/dev/null 2>&1 && echo PISM_YES || echo PISM_NO")
+	out, err := exec.Command("ssh", args...).Output()
+	if err != nil {
+		return false, err // 255 = unreachable/auth; treat as skip
+	}
+	return strings.Contains(string(out), "PISM_YES"), nil
+}
 
 // ensureRemotePath appends ~/.local/bin to the remote shell rc files that
 // non-interactive ssh sessions read, idempotently. The script is fed to a

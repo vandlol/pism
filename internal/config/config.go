@@ -24,11 +24,14 @@ import (
 var Keys = []struct{ Name, Desc string }{
 	{"pi", "command used to launch pi (default: pi)"},
 	{"detach-key", `detach key: ^\ , ctrl-o, a char, a code, or "none" (default: ^\)`},
+	{"switch-prev-key", `attach to previous live session (default: ctrl-left; "none" to disable)`},
+	{"switch-next-key", `attach to next live session (default: ctrl-right; "none" to disable)`},
 	{"topic-len", "max topic width in ls (default: 40)"},
 	{"remote-bin", "pism path on remote hosts (default: pism)"},
 	{"ssh-config", "ssh config file to pass as -F (default: auto/none)"},
 	{"update-url", "custom base URL for `pism update` (overrides channel)"},
 	{"update-channel", "update channel: stable|latest, or unstable|dev|nightly (pre-releases)"},
+	{"update-exclude", "hosts to always skip in `update --all` (comma/space globs)"},
 	{"ready-timeout", "how long `new` waits for pi to come up (e.g. 30s, 5m, 0=forever)"},
 }
 

@@ -61,6 +61,21 @@ func Run(cfg Config) error {
 	// On Windows, pi is often a .cmd/.ps1 shim that ConPTY can't exec directly;
 	// resolvePiCommand wraps such shims in their interpreter (no-op on Unix).
 	piName, piArgs := resolvePiCommand(cfg.PiCmd, args)
+	// NOTE (keyboard-protocol negotiation): pi is spawned here against a
+	// *headless* pty — no real terminal is behind it yet, and typically no
+	// client is even attached. At startup pi probes for the Kitty keyboard
+	// protocol (ESC[?u) and Primary DA (ESC[c). Nothing on this pty answers the
+	// Kitty query (the holder is not a terminal emulator and must stay a
+	// transparent passthrough, so it deliberately does NOT synthesize a reply),
+	// so pi times out and takes the xterm modifyOtherKeys FALLBACK
+	// (ESC[>4;2m). That enable then rides through to whichever real terminal
+	// later attaches, and a pism detach leaves pi running so pi never emits the
+	// matching disable. The client is therefore responsible for resetting BOTH
+	// modifyOtherKeys and the Kitty stack on every teardown path — see
+	// internal/client.inputProtoReset. Making pi negotiate Kitty here would
+	// require lying about terminal capabilities before we know the client's
+	// terminal, which would corrupt non-Kitty terminals; the robust fix lives
+	// at teardown instead.
 	c := p.Command(piName, piArgs...)
 	c.Dir = cfg.Cwd
 	c.Env = append(os.Environ(), "PISM_SESSION="+cfg.ID)

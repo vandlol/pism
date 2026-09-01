@@ -25,16 +25,19 @@ var version = "dev" // overridden at build time via -ldflags "-X main.version=..
 type globals struct {
 	host      string
 	remoteBin string
-	pi        string
-	detachStr string
-	sshConfig string
-	topicLen  int
+	pi         string
+	detachStr  string
+	switchPrev string
+	switchNext string
+	sshConfig  string
+	topicLen   int
 
 	readyTimeout time.Duration
 	verbosity    int
 
 	setPi       bool
 	setDetach   bool
+	setSwitch   bool
 	setTopicLen bool
 	dist        string
 }
@@ -49,7 +52,7 @@ func run(argv []string) int {
 		return runHolder(argv[1:])
 	}
 
-	g := globals{pi: "pi", detachStr: "^\\", topicLen: 40, dist: "dist", readyTimeout: 30 * time.Second}
+	g := globals{pi: "pi", detachStr: "^\\", switchPrev: "ctrl-left", switchNext: "ctrl-right", topicLen: 40, dist: "dist", readyTimeout: 30 * time.Second}
 	// Load config (creates the file on first run) and apply it as defaults
 	// beneath any command-line flags.
 	if cfg, cerr := config.Load(); cerr == nil {
@@ -81,9 +84,9 @@ func run(argv []string) int {
 	case "build-all":
 		return cmdBuildAll(g, args)
 	case "config":
-		return cmdConfig(args)
+		return cmdConfig(g, args)
 	case "update", "self-update":
-		return cmdUpdate(args)
+		return cmdUpdate(g, args)
 	case "install":
 		// pism install <host> [flags]
 		return cmdInstall(g, args)
@@ -250,15 +253,37 @@ func attachByID(g globals, idOrPrefix string) int {
 		fmt.Fprintln(os.Stderr, "pism attach:", err)
 		return 1
 	}
-	err = client.Attach(m, parseDetach(g.detachStr))
-	if err != nil {
-		if ee, ok := err.(*client.ExitError); ok {
-			return ee.Code
-		}
-		fmt.Fprintln(os.Stderr, "pism attach:", err)
-		return 1
+	keys := client.Keys{
+		Detach:     parseDetach(g.detachStr),
+		SwitchPrev: parseSwitch(g.switchPrev),
+		SwitchNext: parseSwitch(g.switchNext),
 	}
-	return 0
+	for {
+		outcome, err := client.Attach(m, keys)
+		if err != nil {
+			if ee, ok := err.(*client.ExitError); ok {
+				return ee.Code
+			}
+			fmt.Fprintln(os.Stderr, "pism attach:", err)
+			return 1
+		}
+		dir := 0
+		switch outcome {
+		case client.OutcomeSwitchPrev:
+			dir = -1
+		case client.OutcomeSwitchNext:
+			dir = 1
+		default:
+			return 0
+		}
+		next, nerr := manager.AdjacentLive(m.ID, dir)
+		if nerr != nil {
+			fmt.Fprintln(os.Stderr, "pism attach:", nerr)
+			return 1
+		}
+		m = next
+		fmt.Fprintf(os.Stderr, "[switching to %s]\n", session.Topic(m.ID, m.Cwd, g.topicLen))
+	}
 }
 
 func cmdKill(g globals, args []string) int {
@@ -326,6 +351,9 @@ func forward(g globals, cmd string, args []string) int {
 	}
 	if g.setDetach && cmd == "attach" {
 		fwd = append(fwd, "--detach-key", g.detachStr)
+	}
+	if g.setSwitch && cmd == "attach" {
+		fwd = append(fwd, "--switch-prev-key", g.switchPrev, "--switch-next-key", g.switchNext)
 	}
 	if g.setTopicLen && cmd == "ls" {
 		fwd = append(fwd, "--topic-len", strconv.Itoa(g.topicLen))
