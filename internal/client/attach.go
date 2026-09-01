@@ -73,6 +73,78 @@ func indexAny(chunk []byte, keys [][]byte) (int, int) {
 	return best, bestLen
 }
 
+// csiuCode returns the numeric keycode of a Kitty CSI-u sequence
+// (ESC '[' <digits> ... 'u'), or (nil,false) if k isn't one. Only the leading
+// keycode digits are returned; any modifier/event suffix is ignored.
+func csiuCode(k []byte) ([]byte, bool) {
+	if len(k) < 4 || k[0] != 0x1b || k[1] != '[' || k[len(k)-1] != 'u' {
+		return nil, false
+	}
+	i := 2
+	for i < len(k) && k[i] >= '0' && k[i] <= '9' {
+		i++
+	}
+	if i == 2 { // no digits
+		return nil, false
+	}
+	return k[2:i], true
+}
+
+// matchCSIu finds the earliest occurrence of a Kitty CSI-u sequence for the
+// given keycode in chunk, matching ANY modifier/event variant and consuming
+// through the terminating 'u'. So the bare (ESC[57379u), modified
+// (ESC[57379;2u) and key-release (ESC[57379;1:3u) forms all match, and the
+// whole sequence is consumed — no dangling 'u' to desync the parser or a
+// double fire. Returns (index, length) or (-1, 0).
+func matchCSIu(chunk, code []byte) (int, int) {
+	prefix := make([]byte, 0, len(code)+2)
+	prefix = append(prefix, 0x1b, '[')
+	prefix = append(prefix, code...)
+	from := 0
+	for from < len(chunk) {
+		i := bytes.Index(chunk[from:], prefix)
+		if i < 0 {
+			return -1, 0
+		}
+		start := from + i
+		j := start + len(prefix)
+		// The keycode must end here: the next byte can't be another digit
+		// (else this is a longer code that merely shares our prefix).
+		if j < len(chunk) && chunk[j] >= '0' && chunk[j] <= '9' {
+			from = start + 1
+			continue
+		}
+		// Scan the optional ';'/':'/digit params through to 'u'.
+		k := j
+		for k < len(chunk) {
+			c := chunk[k]
+			if c == 'u' {
+				return start, k - start + 1
+			}
+			if c != ';' && c != ':' && (c < '0' || c > '9') {
+				break // not a CSI-u body; this occurrence isn't a real match
+			}
+			k++
+		}
+		from = start + 1 // no terminating 'u' in this chunk; keep searching
+	}
+	return -1, 0
+}
+
+// keyMatcher builds a matcher for a configured key. CSI-u keys (F13-F20) match
+// any modifier/event variant of their keycode (see matchCSIu); everything else
+// matches the exact known encoding variants (see detachVariants).
+func keyMatcher(k []byte) func([]byte) (int, int) {
+	if len(k) == 0 {
+		return nil
+	}
+	if code, ok := csiuCode(k); ok {
+		return func(chunk []byte) (int, int) { return matchCSIu(chunk, code) }
+	}
+	variants := detachVariants(k)
+	return func(chunk []byte) (int, int) { return indexAny(chunk, variants) }
+}
+
 // Outcome reports why Attach returned, so the caller can decide whether to
 // re-attach to an adjacent session (switch), stop cleanly (detach/exit), or
 // propagate an exit code.
@@ -127,10 +199,23 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 		defer restore()
 	}
 	// Safety net: whatever happens (clean detach, pi exit, or a panic), make
-	// sure we pop the Kitty keyboard protocol that the inner app pushed, so the
-	// user's terminal never gets wedged (Shift emitting escape codes). Cheap
-	// and idempotent — popping an empty Kitty stack is a no-op.
+	// sure we reset the input protocols the inner app enabled (xterm
+	// modifyOtherKeys AND the Kitty keyboard stack) so the user's terminal
+	// never gets wedged (arrows/Shift+Tab/F-keys emitting escape codes). Cheap
+	// and idempotent.
 	defer popKitty()
+
+	// Defers don't run when we're killed by a signal (SIGTERM/SIGHUP), so on
+	// those paths the modifyOtherKeys/Kitty leak would persist. Install a
+	// handler that restores the terminal and then dies with the default
+	// disposition, matching the clean-detach teardown.
+	stopSignals := installSignalRestore(func() {
+		resetTerm(true)
+		if raw {
+			restore()
+		}
+	})
+	defer stopSignals()
 
 	// NOTE: we deliberately do NOT push the Kitty keyboard protocol ourselves.
 	// pism is a transparent passthrough, not a translating multiplexer: if we
@@ -179,13 +264,13 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 	// so a switch key is never swallowed by a later detach match (or vice
 	// versa). intent carries which action fired to the select below.
 	type interceptor struct {
-		keys   [][]byte
+		match  func([]byte) (int, int)
 		intent Outcome
 	}
 	interceptors := []interceptor{
-		{detachVariants(keys.Detach), OutcomeDetach},
-		{detachVariants(keys.SwitchPrev), OutcomeSwitchPrev},
-		{detachVariants(keys.SwitchNext), OutcomeSwitchNext},
+		{keyMatcher(keys.Detach), OutcomeDetach},
+		{keyMatcher(keys.SwitchPrev), OutcomeSwitchPrev},
+		{keyMatcher(keys.SwitchNext), OutcomeSwitchNext},
 	}
 	stopped := make(chan Outcome, 1)
 	go func() {
@@ -197,10 +282,10 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 				// Find the earliest interceptor match across all bindings.
 				hitIdx, hitIntent := -1, OutcomeExit
 				for _, ic := range interceptors {
-					if len(ic.keys) == 0 {
+					if ic.match == nil {
 						continue
 					}
-					if i, _ := indexAny(chunk, ic.keys); i >= 0 && (hitIdx == -1 || i < hitIdx) {
+					if i, _ := ic.match(chunk); i >= 0 && (hitIdx == -1 || i < hitIdx) {
 						hitIdx, hitIntent = i, ic.intent
 					}
 				}
@@ -250,20 +335,39 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 	}
 }
 
-// kittyDrain pops the Kitty keyboard protocol off the terminal's stack several
-// times. pi (and other TUIs) push it (flags 7, incl. report-event-types) and
-// do NOT pop on a pism detach because they keep running, oblivious that we
-// left. If we don't pop, wezterm/kitty/foot are left in Kitty mode at the bare
-// shell and modifier keys (Shift!) start emitting escape codes instead of
-// typing. Popping an empty stack is a no-op, so over-draining is safe while
-// under-draining wedges the terminal.
-var kittyDrain = []byte("\x1b[<u\x1b[<u\x1b[<u\x1b[<u")
+// inputProtoReset returns a terminal's keyboard-input encoding to the legacy
+// state on EVERY pism teardown path (clean detach, pi exit, panic, signal).
+//
+// The child (pi) may enable one of two independent "enhanced key" protocols and
+// then NEVER tear it down, because a pism detach leaves pi running, oblivious
+// that we left. Both must be undone or the bare shell is wedged (arrows,
+// Shift+Tab, F-keys and even Shift start emitting escape codes that only pi
+// parses):
+//
+//	\x1b[>4;0m   xterm modifyOtherKeys OFF. THE one that actually mattered:
+//	             byte-level capture proved pi took the modifyOtherKeys FALLBACK
+//	             (it couldn't negotiate the Kitty protocol against the holder's
+//	             headless pty), so \x1b[>4;2m was the sequence left dangling.
+//	             This is INVISIBLE to the Kitty query \x1b[?u (flags read 0),
+//	             so popping the Kitty stack alone never fixed it.
+//	\x1b[<u ×4   pop the Kitty keyboard stack, in case pi DID take the Kitty
+//	             path on a terminal that supports it. Over-popping an empty
+//	             stack is a harmless no-op.
+//
+// Both are safe to send unconditionally and cheap; we deliberately do NOT try
+// to detect which one is active, because the whole bug class is teardown paths
+// that get skipped.
+var inputProtoReset = []byte("\x1b[>4;0m\x1b[<u\x1b[<u\x1b[<u\x1b[<u")
 
-// popKitty writes the Kitty drain directly (used as a defer safety net so an
-// abnormal exit path still restores the terminal).
+// kittyDrain is retained as an alias for callers/tests referring to the Kitty
+// pop; the full reset now also disables modifyOtherKeys.
+var kittyDrain = inputProtoReset
+
+// popKitty writes the input-protocol reset directly (used as a defer safety net
+// so an abnormal exit path — including a panic — still restores the terminal).
 func popKitty() {
 	if term.IsTerminal(int(os.Stdout.Fd())) {
-		_, _ = os.Stdout.Write(kittyDrain)
+		_, _ = os.Stdout.Write(inputProtoReset)
 	}
 }
 
@@ -276,7 +380,7 @@ func resetTerm(clear bool) {
 		return
 	}
 	var b []byte
-	b = append(b, kittyDrain...)      // return input encoding to legacy (see popKitty)
+	b = append(b, inputProtoReset...) // modifyOtherKeys off + Kitty pop (see popKitty)
 	b = append(b, "\x1b[r"...)        // reset scroll region (DECSTBM -> full)
 	b = append(b, "\x1b[?25h"...)     // show cursor
 	b = append(b, "\x1b[?2004l"...)   // bracketed paste off
@@ -284,9 +388,9 @@ func resetTerm(clear bool) {
 	b = append(b, "\x1b[?1002l"...)
 	b = append(b, "\x1b[?1003l"...)
 	b = append(b, "\x1b[?1006l"...)
-	b = append(b, "\x1b[?2026l"...)   // synchronized-update off
-	b = append(b, "\x1b[?1049l"...)   // leave alternate screen (no-op if not set)
-	b = append(b, "\x1b[0m"...)       // reset attributes
+	b = append(b, "\x1b[?2026l"...) // synchronized-update off
+	b = append(b, "\x1b[?1049l"...) // leave alternate screen (no-op if not set)
+	b = append(b, "\x1b[0m"...)     // reset attributes
 	if clear {
 		b = append(b, "\x1b[H\x1b[2J"...) // home + clear screen
 	}
