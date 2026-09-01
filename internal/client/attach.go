@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 
@@ -17,8 +18,8 @@ const DefaultDetach = 0x1c
 
 // Attach connects the current terminal to the given session until the user
 // presses the detach key (session keeps running) or pi exits.
-// detachKey is the byte that triggers detach; 0 disables it.
-func Attach(m *session.Meta, detachKey byte) error {
+// detachKey is the byte sequence that triggers detach; empty disables it.
+func Attach(m *session.Meta, detachKey []byte) error {
 	nc, err := transport.Dial(m.Endpoint)
 	if err != nil {
 		return fmt.Errorf("dial session: %w", err)
@@ -83,8 +84,8 @@ func Attach(m *session.Meta, detachKey byte) error {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
-				if detachKey != 0 {
-					if i := indexByte(chunk, detachKey); i >= 0 {
+				if len(detachKey) != 0 {
+					if i := bytes.Index(chunk, detachKey); i >= 0 {
 						if i > 0 {
 							_ = cw.Write(proto.TInput, chunk[:i])
 						}
@@ -176,15 +177,6 @@ func sendSize(cw *proto.ConnWriter) {
 		cols, rows = c, r
 	}
 	_ = cw.Write(proto.TResize, proto.EncodeResize(cols, rows))
-}
-
-func indexByte(b []byte, c byte) int {
-	for i := range b {
-		if b[i] == c {
-			return i
-		}
-	}
-	return -1
 }
 
 func short(id string) string {

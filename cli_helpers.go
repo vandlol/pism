@@ -313,28 +313,90 @@ func splitFlag(a string) (key, val string, hasInline bool) {
 	return a, "", false
 }
 
-// parseDetach turns a human detach-key spec into a byte.
-// Accepts: "^\\" or "ctrl-\\" style (caret/ctrl + char), "none"/"off" (0),
-// a single literal char, or a decimal code.
-func parseDetach(s string) byte {
+// parseDetach turns a human detach-key spec into a byte sequence. An empty
+// result means "disabled". Accepts:
+//   - "none"/"off"/"disable"       -> disabled
+//   - "^\\" or "ctrl-\\"            -> control byte (caret/ctrl + char)
+//   - a decimal code (0-255)       -> that byte
+//   - a function-key name f1..f20  -> the terminal escape sequence for it
+//   - a raw escape spec (\x1b..., \e..., esc...) -> those literal bytes
+//   - a single literal char        -> that char
+//
+// Unrecognized specs fall back to the default and print a warning, so a typo
+// no longer silently leaves you on Ctrl-\ with no clue why.
+func parseDetach(s string) []byte {
 	s = strings.TrimSpace(s)
-	switch strings.ToLower(s) {
+	lower := strings.ToLower(s)
+	switch lower {
 	case "", "none", "off", "disable", "disabled":
-		return 0
+		return nil
+	}
+	if seq, ok := functionKeys[lower]; ok {
+		return []byte(seq)
+	}
+	if seq, ok := parseEscapeSpec(s); ok {
+		return seq
 	}
 	if n, err := strconv.Atoi(s); err == nil && n >= 0 && n < 256 {
-		return byte(n)
+		return []byte{byte(n)}
 	}
-	if strings.HasPrefix(strings.ToLower(s), "ctrl-") && len(s) == 6 {
-		return ctrlByte(s[5])
+	if strings.HasPrefix(lower, "ctrl-") && len(s) == 6 {
+		return []byte{ctrlByte(s[5])}
 	}
 	if strings.HasPrefix(s, "^") && len(s) == 2 {
-		return ctrlByte(s[1])
+		return []byte{ctrlByte(s[1])}
 	}
 	if len(s) == 1 {
-		return s[0]
+		return []byte{s[0]}
 	}
-	return client_DefaultDetach
+	fmt.Fprintf(os.Stderr, "pism: unrecognized detach-key %q; using default (Ctrl-\\)\n", s)
+	return []byte{client_DefaultDetach}
+}
+
+// functionKeys maps function-key names to the escape sequences xterm-family
+// terminals (xterm-256color, iTerm, Windows Terminal) emit for them. F13-F16
+// use the modern CSI-modifier form (Shift+F1..F4) which matches current
+// terminfo; F17-F20 use the tilde form.
+var functionKeys = map[string]string{
+	"f1": "\x1bOP", "f2": "\x1bOQ", "f3": "\x1bOR", "f4": "\x1bOS",
+	"f5": "\x1b[15~", "f6": "\x1b[17~", "f7": "\x1b[18~", "f8": "\x1b[19~",
+	"f9": "\x1b[20~", "f10": "\x1b[21~", "f11": "\x1b[23~", "f12": "\x1b[24~",
+	"f13": "\x1b[1;2P", "f14": "\x1b[1;2Q", "f15": "\x1b[1;2R", "f16": "\x1b[1;2S",
+	"f17": "\x1b[15;2~", "f18": "\x1b[17;2~", "f19": "\x1b[18;2~", "f20": "\x1b[19;2~",
+}
+
+// parseEscapeSpec accepts a literal escape sequence written as text, so users
+// whose terminal emits something different can set the exact bytes. Understands
+// a leading \x1b, \e, \033, or the word "esc" as ESC (0x1b), plus \xNN hex
+// escapes anywhere in the string.
+func parseEscapeSpec(s string) ([]byte, bool) {
+	low := strings.ToLower(s)
+	var rest string
+	switch {
+	case strings.HasPrefix(low, "\\x1b"):
+		rest = s[4:]
+	case strings.HasPrefix(low, "\\033"):
+		rest = s[4:]
+	case strings.HasPrefix(low, "\\e"):
+		rest = s[2:]
+	case strings.HasPrefix(low, "esc"):
+		rest = s[3:]
+	default:
+		return nil, false
+	}
+	out := []byte{0x1b}
+	for i := 0; i < len(rest); {
+		if rest[i] == '\\' && i+4 <= len(rest) && (rest[i+1] == 'x' || rest[i+1] == 'X') {
+			if n, err := strconv.ParseUint(rest[i+2:i+4], 16, 8); err == nil {
+				out = append(out, byte(n))
+				i += 4
+				continue
+			}
+		}
+		out = append(out, rest[i])
+		i++
+	}
+	return out, true
 }
 
 // ctrlByte maps a printable char to its control code (e.g. '\\' -> 0x1c).
@@ -438,7 +500,8 @@ FLAGS
                          ./ssh_config, ./.ssh/config or ./.pism/ssh_config;
                          else falls back to ssh's own ~/.ssh/config
   --pi <cmd>             Command used to launch pi (default: pi)
-  --detach-key <spec>    Detach key: ^\ , ctrl-o, a char, a code, or "none"
+  --detach-key <spec>    Detach key: ^\ , ctrl-o, f16, a char, a code,
+                         an escape seq (\x1b[29~), or "none"
   --topic-len <n>        Max topic width in ls (default: 40)
   --dist <dir>           Output/dir for build-all & push (default: dist)
   -v / -vv / -vvv        Verbosity: info / debug / trace (holder logs land in
