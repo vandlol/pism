@@ -291,7 +291,17 @@ func cmdLs(g globals, args []string) int {
 }
 
 func cmdAttach(g globals, args []string) int {
-	if len(args) == 0 {
+	id := firstPositional(args)
+	if hasAllHostsMode(args) {
+		// Cross-host mode: attach and let Ctrl-Left/Right switch across hosts.
+		sel := parseAllHostsFlags(args)
+		start, ok := resolveStart(g, id, sel)
+		if !ok {
+			return 1
+		}
+		return orchestrate(g, start, sel)
+	}
+	if id == "" {
 		// No id: resume the most recently created live session.
 		m, err := manager.NewestLive()
 		if err != nil {
@@ -300,7 +310,56 @@ func cmdAttach(g globals, args []string) int {
 		}
 		return attachByID(g, m.ID)
 	}
-	return attachByID(g, args[0])
+	return attachByID(g, id)
+}
+
+// firstPositional returns the first non-flag argument (and skips a value that
+// belongs to a preceding value-taking selection flag).
+func firstPositional(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") {
+			key, _, inline := splitFlag(a)
+			if !inline {
+				switch key {
+				case "--include", "--exclude", "--connect-timeout":
+					i++ // consume the value
+				}
+			}
+			continue
+		}
+		return a
+	}
+	return ""
+}
+
+// resolveStart picks the starting target for a cross-host attach: the given id
+// (resolved locally first, then across the universe), or the newest live
+// session anywhere when id is empty.
+func resolveStart(g globals, id string, sel allHostsSel) (xtarget, bool) {
+	if id == "" {
+		uni := buildUniverse(g, sel)
+		if len(uni) == 0 {
+			fmt.Fprintln(os.Stderr, "pism attach: no live sessions on any host")
+			return xtarget{}, false
+		}
+		return uni[0], true
+	}
+	if m, err := session.Load(id); err == nil {
+		return xtarget{Host: localHost, ID: m.ID}, true
+	}
+	// Not local: look for it across hosts.
+	uni := buildUniverse(g, sel)
+	if i := indexOf(uni, xtarget{Host: "", ID: id}); i >= 0 {
+		return uni[i], true
+	}
+	for _, t := range uni {
+		if strings.HasPrefix(t.ID, id) {
+			return t, true
+		}
+	}
+	fmt.Fprintf(os.Stderr, "pism attach: no live session matching %q on any host\n", id)
+	return xtarget{}, false
 }
 
 func attachByID(g globals, idOrPrefix string) int {

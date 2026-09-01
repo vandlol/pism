@@ -242,6 +242,21 @@ func parseAllHostsFlags(args []string) allHostsSel {
 // On a switch key it moves to the adjacent live session ON THE SAME HOST,
 // resolved via that host's `ls --porcelain`.
 func cmdAttachRemote(g globals, host string, args []string) int {
+	if hasAllHostsMode(args) {
+		// Cross-host mode, starting on this host.
+		sel := parseAllHostsFlags(args)
+		id := firstPositional(args)
+		start := xtarget{Host: host, ID: id}
+		if id == "" {
+			uni := buildUniverse(g, sel)
+			if len(uni) == 0 {
+				fmt.Fprintln(os.Stderr, "pism attach: no live sessions on any host")
+				return 1
+			}
+			start = uni[0]
+		}
+		return orchestrate(g, start, sel)
+	}
 	if len(args) == 0 {
 		// No id: let the remote pick the newest live session (legacy path).
 		g.host = host
@@ -905,8 +920,9 @@ COMMANDS
   ls                               List sessions with their topic + liveness
   ls --all [--include globs]       Aggregate sessions from every ssh-config host
      [--exclude globs]             into one host-tagged table (local + remotes)
-  attach <id>                      Re-attach to a session (detach: Ctrl-\ ;
-                                   switch sessions: Ctrl-Left / Ctrl-Right)
+  attach <id> [--all]              Re-attach to a session (detach: Ctrl-\ ;
+                                   switch sessions: Ctrl-Left / Ctrl-Right).
+                                   --all: switch across every ssh-config host
   kill <id> [id...]                Terminate session(s)
   gc                               Remove metadata for dead sessions
   topic <id>                       Print a session's topic (for scripts)
@@ -949,6 +965,7 @@ EXAMPLES
   pism srv new ~/svc               start a session on 'srv'
   pism srv update --pre            update pism on host 'srv' over ssh
   pism ls --all                    list sessions across local + every ssh host
+  pism attach --all                attach + switch across hosts (Ctrl-Left/Right)
   pism update --all                update every ssh-config host that has pism
   pism update --all --exclude ci-* update all hosts except those matching ci-*
   pism config --all update-channel unstable   set a config key on every host
