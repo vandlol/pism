@@ -86,7 +86,7 @@ func run(argv []string) int {
 	case "config":
 		return cmdConfig(args)
 	case "update", "self-update":
-		return cmdUpdate(args)
+		return cmdUpdate(g, args)
 	case "install":
 		// pism install <host> [flags]
 		return cmdInstall(g, args)

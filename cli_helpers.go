@@ -124,7 +124,13 @@ func parseWait(s string) time.Duration {
 // cmdUpdate replaces the running binary with a fresh build from the update
 // server (this Mac by default; override with the update-url config key,
 // $PISM_UPDATE_URL, or --update-url).
-func cmdUpdate(args []string) int {
+//
+// With --all / --hosts / --include / --exclude it instead fans out over the
+// ssh-config hosts, updating each one that has pism installed.
+func cmdUpdate(g globals, args []string) int {
+	if hasUpdateHostMode(args) {
+		return cmdUpdateHosts(g, args)
+	}
 	base := os.Getenv("PISM_UPDATE_URL")
 	channel := os.Getenv("PISM_UPDATE_CHANNEL")
 	if cfg, err := config.Load(); err == nil {
@@ -162,6 +168,93 @@ func cmdUpdate(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// hasUpdateHostMode reports whether any multi-host trigger flag is present.
+func hasUpdateHostMode(args []string) bool {
+	for _, a := range args {
+		key, _, _ := splitFlag(a)
+		switch key {
+		case "--all", "--hosts", "--include", "--exclude":
+			return true
+		}
+	}
+	return false
+}
+
+// cmdUpdateHosts fans `pism update` out across ssh-config hosts. By default it
+// targets every concrete Host in the config; --include narrows to a set and
+// --exclude removes hosts (both accept comma/space-separated glob patterns and
+// may repeat). Remaining update flags (--pre, --stable, --update-url, …) are
+// forwarded verbatim to each remote update.
+func cmdUpdateHosts(g globals, args []string) int {
+	var include, exclude []string
+	var passthrough []string
+	timeout := 10
+
+	// Seed persistent excludes from config.
+	if cfg, err := config.Load(); err == nil {
+		if v, ok := cfg.Get("update-exclude"); ok {
+			exclude = append(exclude, splitList(v)...)
+		}
+	}
+
+	for i := 0; i < len(args); i++ {
+		key, val, inline := splitFlag(args[i])
+		take := func() string {
+			if inline {
+				return val
+			}
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return ""
+		}
+		switch key {
+		case "--all", "--hosts":
+			// selection trigger only; no value
+		case "--include":
+			include = append(include, splitList(take())...)
+		case "--exclude":
+			exclude = append(exclude, splitList(take())...)
+		case "--connect-timeout":
+			if n, err := strconv.Atoi(take()); err == nil && n >= 0 {
+				timeout = n
+			}
+		default:
+			passthrough = append(passthrough, args[i])
+		}
+	}
+
+	code, err := remote.UpdateAll(remote.UpdateAllOptions{
+		ConfigFile:     remote.ResolveConfig(g.sshConfig),
+		RemoteBin:      g.remoteBin,
+		Include:        include,
+		Exclude:        exclude,
+		Args:           passthrough,
+		ConnectTimeout: timeout,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pism update:", err)
+		return 1
+	}
+	return code
+}
+
+// splitList splits a comma/space/semicolon-separated list into trimmed,
+// non-empty tokens.
+func splitList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == ';'
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // cmdConfig implements the git-style `pism config` command.
@@ -564,6 +657,9 @@ COMMANDS
   config [key] [value]             Show all keys, or get/set (--list, --unset, --path)
   update [--pre|--stable]          Update pism in place (channel: stable|unstable;
                                    remote: pism <host> update updates that host)
+  update --all [--include globs]   Update every ssh-config host that has pism
+         [--exclude globs]         (default: all; --exclude persists via the
+                                   update-exclude config key)
   install <host>                   Install pism on a remote host over ssh
                                    (also: pism <host> install)
   logs <id>                        Print a session's holder log (diagnostics)
@@ -594,5 +690,7 @@ EXAMPLES
   pism srv attach 3f9a             attach to a remote session on 'srv'
   pism srv new ~/svc               start a session on 'srv'
   pism srv update --pre            update pism on host 'srv' over ssh
+  pism update --all                update every ssh-config host that has pism
+  pism update --all --exclude ci-* update all hosts except those matching ci-*
 `)
 }
