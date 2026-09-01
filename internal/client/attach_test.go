@@ -40,6 +40,69 @@ func TestDetachVariantsNonCSIuUnchanged(t *testing.T) {
 	}
 }
 
+func TestInputProtoResetDisablesModifyOtherKeys(t *testing.T) {
+	// The regression this guards: teardown must emit modifyOtherKeys-off, not
+	// just the Kitty pop. Without \x1b[>4;0m the terminal stays wedged.
+	if !bytes.Contains(inputProtoReset, []byte("\x1b[>4;0m")) {
+		t.Fatalf("inputProtoReset %q missing modifyOtherKeys-off \\x1b[>4;0m", inputProtoReset)
+	}
+	if !bytes.Contains(inputProtoReset, []byte("\x1b[<u")) {
+		t.Fatalf("inputProtoReset %q missing Kitty pop \\x1b[<u", inputProtoReset)
+	}
+}
+
+func TestMatchCSIuVariants(t *testing.T) {
+	code := []byte("57379") // F16
+	cases := []struct {
+		name   string
+		chunk  string
+		idx    int
+		length int
+	}{
+		{"bare", "\x1b[57379u", 0, 8},
+		{"no-mod ;1", "\x1b[57379;1u", 0, 10},
+		{"modified ;2", "x\x1b[57379;2u", 1, 10},
+		{"key-release ;1:3", "\x1b[57379;1:3u", 0, 12},
+		{"embedded", "ab\x1b[57379ucd", 2, 8},
+	}
+	for _, c := range cases {
+		i, n := matchCSIu([]byte(c.chunk), code)
+		if i != c.idx || n != c.length {
+			t.Errorf("%s: matchCSIu(%q) = (%d,%d); want (%d,%d)", c.name, c.chunk, i, n, c.idx, c.length)
+		}
+	}
+}
+
+func TestMatchCSIuNoFalsePrefix(t *testing.T) {
+	// A longer keycode sharing our prefix must NOT match (57379 vs 573790).
+	if i, _ := matchCSIu([]byte("\x1b[573790u"), []byte("57379")); i != -1 {
+		t.Fatalf("matchCSIu matched a longer keycode sharing the prefix (i=%d)", i)
+	}
+	// A different keycode must not match.
+	if i, _ := matchCSIu([]byte("\x1b[57376u"), []byte("57379")); i != -1 {
+		t.Fatalf("matchCSIu matched a different keycode (i=%d)", i)
+	}
+}
+
+func TestKeyMatcherRoutesCSIuVsExact(t *testing.T) {
+	// F16 (CSI-u) matcher accepts a modified variant the exact-variant matcher
+	// would miss.
+	m := keyMatcher([]byte("\x1b[57379u"))
+	if i, _ := m([]byte("\x1b[57379;5u")); i != 0 {
+		t.Fatalf("CSI-u keyMatcher should match modified form; got %d", i)
+	}
+	// Ctrl-\ (single byte) matcher does an exact match.
+	m2 := keyMatcher([]byte{0x1c})
+	if i, _ := m2([]byte("ab\x1ccd")); i != 2 {
+		t.Fatalf("byte keyMatcher exact match failed; got %d", i)
+	}
+	// ctrl-left arrow (\x1b[1;5D) is NOT CSI-u; must match exactly.
+	m3 := keyMatcher([]byte("\x1b[1;5D"))
+	if i, _ := m3([]byte("\x1b[1;5D")); i != 0 {
+		t.Fatalf("arrow keyMatcher exact match failed; got %d", i)
+	}
+}
+
 func containsSeq(set [][]byte, want []byte) bool {
 	for _, s := range set {
 		if bytes.Equal(s, want) {
