@@ -105,6 +105,10 @@ pism kill 3f9a           # done
 transcript unambiguously — topics stay correct even across symlinks or when two
 sessions share a directory.
 
+By default `new` waits up to 30s for pi to come up before attaching; tune it per
+run with `-w/--wait` (`pism new ~/proj -w 5m`, `-w 0` waits forever) or
+permanently via `pism config ready-timeout`.
+
 ---
 
 ## Remote hosts over SSH
@@ -188,21 +192,26 @@ pism push srv        # scp the matching binary to srv:~/.local/bin/pism
 ## Commands
 
 ```
-pism new [dir] [-d] [-- pi args...]   Start a new pi session (attaches unless -d)
+pism new [dir] [-d] [-w dur] [-- pi args...]  Start a new session (attaches unless -d;
+                                      -w/--wait sets the ready timeout, 0=forever)
 pism ls                               List sessions with topic + liveness
 pism attach <id>                      Re-attach (id prefixes work: pism a 3f9a)
 pism kill <id> [id...]                Terminate session(s)
 pism gc                               Drop metadata for dead sessions
 pism topic <id>                       Print a session's topic (for scripts)
+pism logs <id>                        Print a session's holder log (diagnostics)
 pism config <key> [value]             Get/set config (--list, --unset, --path)
-pism update                           Update pism in place from the update server
+pism config --all <key> [value]       Get/set a key on every ssh-config host
+pism update [--pre|--stable]          Update pism in place from the update server
+pism update --all                     Update every ssh-config host that has pism
 pism <host> install                   Install pism on a remote host over ssh
 pism push <host> [dest]               Copy the matching binary to a host
 pism build-all                        Cross-compile binaries into ./dist
 pism version
 ```
 
-Any of `ls new attach kill gc topic` can be prefixed with a host to run remotely.
+Any of `ls new attach kill gc topic update logs` can be prefixed with a host to
+run remotely (e.g. `pism srv ls`, `pism srv update --pre`).
 
 ### Flags
 
@@ -216,7 +225,9 @@ Any of `ls new attach kill gc topic` can be prefixed with a host to run remotely
 --ssh-config <path>    ssh config file to use (-F)
 --update-url <url>     custom base URL for `pism update` (overrides channel)
 --pre / --stable       one-off update channel for `pism update`
+--connect-timeout <n>  reachability-probe timeout for `--all` fan-out (default 10s)
 --dist <dir>           output/source dir for build-all & push (default: dist)
+-v / -vv / -vvv        verbosity: info / debug / trace (see `pism logs <id>`)
 ```
 
 Flags override [config](#configuration), which overrides built-in defaults.
@@ -389,6 +400,9 @@ Overrides: `$PISM_STATE_DIR`, `$PISM_CONFIG`, `$PISM_PI_SESSIONS_DIR`.
 ---
 
 ## Troubleshooting
+
+**Diagnosing a session.** Each holder writes a log you can inspect with
+`pism logs <id>` (add `-v`/`-vv`/`-vvv` when creating/attaching for more detail).
 
 **`holder: exec: "pi": executable file not found` over SSH.**
 `ssh host pism ...` runs a *non-interactive, non-login* shell, which on zsh sources
