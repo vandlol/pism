@@ -220,22 +220,28 @@ func MatchesAny(host string, patterns []string) bool {
 	return false
 }
 
-// UpdateAllOptions controls a fan-out update across ssh-config hosts.
-type UpdateAllOptions struct {
+// RunAllOptions controls fanning a single pism subcommand out across the hosts
+// in an ssh config.
+type RunAllOptions struct {
 	ConfigFile     string   // ssh config to enumerate + connect with ("" = ~/.ssh/config)
 	RemoteBin      string   // pism path on the remotes (default "pism")
 	Include        []string // glob patterns; empty = all hosts
 	Exclude        []string // glob patterns to skip
-	Args           []string // passthrough flags for the remote `pism update` (e.g. --pre)
+	Sub            string   // remote pism subcommand to run (e.g. "update", "config")
+	Args           []string // args passed after the subcommand (e.g. --pre, or a config key/value)
 	ConnectTimeout int      // ssh ConnectTimeout seconds for the probe (0 = ssh default)
+	TTY            bool     // allocate a pty on each remote (unused for update/config)
 }
 
-// UpdateAll enumerates hosts from the ssh config, filters them by
-// include/exclude, probes each for a pism binary, and runs `pism update` on the
-// ones that have it. Hosts that are unreachable or lack pism are skipped with a
-// note (not treated as failures). Returns a non-zero code if any actual update
-// failed.
-func UpdateAll(o UpdateAllOptions) (int, error) {
+// RunAll enumerates hosts from the ssh config, filters them by include/exclude,
+// probes each for a pism binary, and runs `pism <Sub> <Args...>` on the ones
+// that have it. Hosts that are unreachable or lack pism are skipped with a note
+// (not treated as failures). Returns a non-zero code if any host's command
+// failed. This powers both `pism update --all` and `pism config --all`.
+func RunAll(o RunAllOptions) (int, error) {
+	if o.Sub == "" {
+		return 1, fmt.Errorf("RunAll: empty subcommand")
+	}
 	hosts, err := ListConfigHosts(o.ConfigFile)
 	if err != nil {
 		return 1, fmt.Errorf("read ssh config: %w", err)
@@ -258,10 +264,10 @@ func UpdateAll(o UpdateAllOptions) (int, error) {
 		return 0, fmt.Errorf("no hosts matched the include/exclude filters")
 	}
 
-	fmt.Fprintf(os.Stderr, "pism update: %d host(s): %s\n", len(targets), strings.Join(targets, ", "))
+	fmt.Fprintf(os.Stderr, "pism %s: %d host(s): %s\n", o.Sub, len(targets), strings.Join(targets, ", "))
 
 	rc := 0
-	var updated, skipped, failed int
+	var ran, skipped, failed int
 	for _, h := range targets {
 		has, perr := hasPism(h, o.ConfigFile, o.RemoteBin, o.ConnectTimeout)
 		if perr != nil {
@@ -274,18 +280,18 @@ func UpdateAll(o UpdateAllOptions) (int, error) {
 			skipped++
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "  [%s] updating…\n", h)
-		code, ferr := Forward(Options{Host: h, RemoteBin: o.RemoteBin, ConfigFile: o.ConfigFile},
-			append([]string{"update"}, o.Args...))
+		fmt.Fprintf(os.Stderr, "  [%s] %s…\n", h, o.Sub)
+		code, ferr := Forward(Options{Host: h, RemoteBin: o.RemoteBin, ConfigFile: o.ConfigFile, TTY: o.TTY},
+			append([]string{o.Sub}, o.Args...))
 		if ferr != nil || code != 0 {
-			fmt.Fprintf(os.Stderr, "  [%s] update FAILED (exit %d)\n", h, code)
+			fmt.Fprintf(os.Stderr, "  [%s] %s FAILED (exit %d)\n", h, o.Sub, code)
 			failed++
 			rc = 1
 			continue
 		}
-		updated++
+		ran++
 	}
-	fmt.Fprintf(os.Stderr, "pism update: %d updated, %d skipped, %d failed\n", updated, skipped, failed)
+	fmt.Fprintf(os.Stderr, "pism %s: %d ok, %d skipped, %d failed\n", o.Sub, ran, skipped, failed)
 	return rc, nil
 }
 
