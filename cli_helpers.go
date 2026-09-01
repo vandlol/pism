@@ -10,8 +10,41 @@ import (
 	"time"
 
 	"github.com/vandlol/pism/internal/config"
+	"github.com/vandlol/pism/internal/remote"
 	"github.com/vandlol/pism/internal/update"
 )
+
+// Raw install script URLs (served from the default branch on GitHub).
+const (
+	installShURL  = "https://raw.githubusercontent.com/vandlol/pism/main/scripts/install.sh"
+	installPs1URL = "https://raw.githubusercontent.com/vandlol/pism/main/scripts/install.ps1"
+)
+
+// runInstall bootstraps pism onto a remote host over ssh (auto-detecting the
+// remote OS). Used by both `pism <host> install` and `pism install <host>`.
+func runInstall(g globals, host string, args []string) int {
+	version := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--version" && i+1 < len(args) {
+			version = args[i+1]
+			i++
+		}
+	}
+	if err := remote.Install(host, remote.ResolveConfig(g.sshConfig), installShURL, installPs1URL, version); err != nil {
+		fmt.Fprintln(os.Stderr, "pism install:", err)
+		return 1
+	}
+	return 0
+}
+
+// cmdInstall handles `pism install <host> [flags]`.
+func cmdInstall(g globals, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: pism install <host>   (or: pism <host> install)")
+		return 2
+	}
+	return runInstall(g, args[0], args[1:])
+}
 
 // applyConfig layers config-file values under the built-in defaults (command
 // line flags, parsed later, override these).
@@ -335,6 +368,8 @@ COMMANDS
   topic <id>                       Print a session's topic (for scripts)
   config <key> [value]             Get/set config (--list, --unset <k>, --path)
   update [--pre|--stable]          Update pism in place (channel: stable|unstable)
+  install <host>                   Install pism on a remote host over ssh
+                                   (also: pism <host> install)
   push <host> [dest]               Copy the matching pism binary to a host
   build-all                        Cross-compile binaries into ./dist
   version

@@ -81,6 +81,9 @@ func run(argv []string) int {
 		return cmdConfig(args)
 	case "update", "self-update":
 		return cmdUpdate(args)
+	case "install":
+		// pism install <host> [flags]
+		return cmdInstall(g, args)
 	}
 
 	// Grammar: the first token is a HOST unless it is a known command.
@@ -94,6 +97,11 @@ func run(argv []string) int {
 			return 2
 		}
 		sub, subArgs := args[0], args[1:]
+		if sub == "install" {
+			// pism <host> install [flags] — bootstrap pism onto the host over
+			// ssh (the remote has no pism yet, so this is NOT forwarded).
+			return runInstall(g, host, subArgs)
+		}
 		if !isRemotable(sub) {
 			fmt.Fprintf(os.Stderr, "pism: %q cannot run on a remote host\n", sub)
 			return 2
