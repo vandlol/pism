@@ -353,16 +353,20 @@ func parseDetach(s string) []byte {
 	return []byte{client_DefaultDetach}
 }
 
-// functionKeys maps function-key names to the escape sequences xterm-family
-// terminals (xterm-256color, iTerm, Windows Terminal) emit for them. F13-F16
-// use the modern CSI-modifier form (Shift+F1..F4) which matches current
-// terminfo; F17-F20 use the tilde form.
+// functionKeys maps function-key names to the escape sequences terminals emit.
+// F1-F12 use the classic xterm sequences. F13-F20 use the Kitty keyboard
+// protocol CSI-u encoding (CSI <code> u), because that is what a modern
+// terminal (wezterm, kitty, foot, ghostty) actually emits for those keys once
+// the Kitty protocol is active. pi enables the Kitty protocol, and pism itself
+// pushes it on attach when the detach key is one of these (see client.Attach),
+// so F13-F20 are reliably encoded. The legacy xterm "shifted F1-F4" form
+// (\x1b[1;2P..S) is NOT emitted by these terminals and never matched.
 var functionKeys = map[string]string{
 	"f1": "\x1bOP", "f2": "\x1bOQ", "f3": "\x1bOR", "f4": "\x1bOS",
 	"f5": "\x1b[15~", "f6": "\x1b[17~", "f7": "\x1b[18~", "f8": "\x1b[19~",
 	"f9": "\x1b[20~", "f10": "\x1b[21~", "f11": "\x1b[23~", "f12": "\x1b[24~",
-	"f13": "\x1b[1;2P", "f14": "\x1b[1;2Q", "f15": "\x1b[1;2R", "f16": "\x1b[1;2S",
-	"f17": "\x1b[15;2~", "f18": "\x1b[17;2~", "f19": "\x1b[18;2~", "f20": "\x1b[19;2~",
+	"f13": "\x1b[57376u", "f14": "\x1b[57377u", "f15": "\x1b[57378u", "f16": "\x1b[57379u",
+	"f17": "\x1b[57380u", "f18": "\x1b[57381u", "f19": "\x1b[57382u", "f20": "\x1b[57383u",
 }
 
 // parseEscapeSpec accepts a literal escape sequence written as text, so users
