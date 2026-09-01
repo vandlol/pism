@@ -62,6 +62,44 @@ func NewestLive() (*session.Meta, error) {
 	return nil, fmt.Errorf("no live sessions to attach to (start one with: pism new)")
 }
 
+// AdjacentLive returns the next (dir=+1) or previous (dir=-1) live session
+// relative to currentID, ordered newest-first with wraparound. Dead sessions
+// are skipped. If currentID is the only live session (or not found), it is
+// returned unchanged. Returns an error only when no live session exists.
+func AdjacentLive(currentID string, dir int) (*session.Meta, error) {
+	metas, err := session.List() // newest-first
+	if err != nil {
+		return nil, err
+	}
+	live := make([]*session.Meta, 0, len(metas))
+	for _, m := range metas {
+		if Alive(m) {
+			live = append(live, m)
+		}
+	}
+	if len(live) == 0 {
+		return nil, fmt.Errorf("no live sessions")
+	}
+	cur := -1
+	for i, m := range live {
+		if m.ID == currentID {
+			cur = i
+			break
+		}
+	}
+	if cur == -1 {
+		// Current isn't live/known; land on the newest.
+		return live[0], nil
+	}
+	step := 1
+	if dir < 0 {
+		step = -1
+	}
+	n := len(live)
+	next := ((cur+step)%n + n) % n
+	return live[next], nil
+}
+
 // Kill asks a holder to terminate pi (graceful), falling back to signalling
 // the holder PID, and cleans up metadata.
 func Kill(idOrPrefix string) error {

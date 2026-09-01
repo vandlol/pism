@@ -27,6 +27,7 @@ a0b2f931  dead  migrate the billing schema           ~/proj/billing      1d
 - [Remote hosts over SSH](#remote-hosts-over-ssh)
 - [Commands](#commands)
 - [Detaching](#detaching)
+- [Switching sessions](#switching-sessions)
 - [Configuration](#configuration)
 - [Self-update](#self-update)
 - [Build from source](#build-from-source)
@@ -179,6 +180,8 @@ Any of `ls new attach kill gc topic` can be prefixed with a host to run remotely
 --remote-bin <path>    pism path on the remote host (default: pism)
 --pi <cmd>             command used to launch pi (default: pi)
 --detach-key <spec>    detach key: ^\ , ctrl-o, a char, a code, or "none"
+--switch-prev-key <spec>  switch to previous session (default: ctrl-left)
+--switch-next-key <spec>  switch to next session (default: ctrl-right)
 --topic-len <n>        max topic width in `ls` (default: 40)
 --ssh-config <path>    ssh config file to use (-F)
 --update-url <url>     custom base URL for `pism update` (overrides channel)
@@ -204,6 +207,25 @@ pism config detach-key ctrl-o           # make it permanent
 pism attach 3f9a --detach-key none      # disable (only pi exit ends it)
 ```
 
+## Switching sessions
+
+While attached, jump straight to another live session without dropping to the
+shell:
+
+- **Ctrl-Left** → attach to the previous live session
+- **Ctrl-Right** → attach to the next live session
+
+Ordering is newest-first with wraparound, and dead sessions are skipped. The
+keys are configurable (per-attach or permanently), and accept named keys like
+`ctrl-left`/`alt-right`, function keys (`f16`), control chars (`ctrl-o`), raw
+escape sequences (`\x1b[1;5D`), or `none` to disable:
+
+```sh
+pism attach 3f9a --switch-prev-key alt-left --switch-next-key alt-right
+pism config switch-prev-key ctrl-left     # make it permanent
+pism config switch-next-key none          # disable next-switch
+```
+
 ---
 
 ## Configuration
@@ -227,7 +249,7 @@ pism config --unset pi             # remove
 pism config --path                 # print the file path
 ```
 
-**Keys:** `pi`, `detach-key`, `topic-len`, `remote-bin`, `ssh-config`, `update-url`, `update-channel`, `ready-timeout`.
+**Keys:** `pi`, `detach-key`, `switch-prev-key`, `switch-next-key`, `topic-len`, `remote-bin`, `ssh-config`, `update-url`, `update-channel`, `ready-timeout`.
 
 **Precedence:** command-line flag **>** config file **>** built-in default.
 Config is per-machine and is *not* pushed to remote hosts (each host reads its own).

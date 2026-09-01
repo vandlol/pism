@@ -73,28 +73,52 @@ func indexAny(chunk []byte, keys [][]byte) (int, int) {
 	return best, bestLen
 }
 
+// Outcome reports why Attach returned, so the caller can decide whether to
+// re-attach to an adjacent session (switch), stop cleanly (detach/exit), or
+// propagate an exit code.
+type Outcome int
+
+const (
+	// OutcomeExit means pi exited or the session ended.
+	OutcomeExit Outcome = iota
+	// OutcomeDetach means the user pressed the detach key.
+	OutcomeDetach
+	// OutcomeSwitchPrev means the user asked to attach to the previous session.
+	OutcomeSwitchPrev
+	// OutcomeSwitchNext means the user asked to attach to the next session.
+	OutcomeSwitchNext
+)
+
+// Keys bundles the byte sequences Attach intercepts. Any field may be empty to
+// disable that binding.
+type Keys struct {
+	Detach     []byte
+	SwitchPrev []byte
+	SwitchNext []byte
+}
+
 // Attach connects the current terminal to the given session until the user
-// presses the detach key (session keeps running) or pi exits.
-// detachKey is the byte sequence that triggers detach; empty disables it.
-func Attach(m *session.Meta, detachKey []byte) error {
+// presses the detach key (session keeps running), presses a switch key
+// (detach and signal the caller to move to an adjacent session), or pi exits.
+func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 	nc, err := transport.Dial(m.Endpoint)
 	if err != nil {
-		return fmt.Errorf("dial session: %w", err)
+		return OutcomeExit, fmt.Errorf("dial session: %w", err)
 	}
 	defer nc.Close()
 
 	if err := proto.WriteFrame(nc, proto.THello, []byte(m.Token)); err != nil {
-		return err
+		return OutcomeExit, err
 	}
 	t, payload, err := proto.ReadFrame(nc)
 	if err != nil {
-		return err
+		return OutcomeExit, err
 	}
 	if t == proto.TError {
-		return fmt.Errorf("attach rejected: %s", string(payload))
+		return OutcomeExit, fmt.Errorf("attach rejected: %s", string(payload))
 	}
 	if t != proto.THelloOK {
-		return fmt.Errorf("unexpected handshake reply %d", t)
+		return OutcomeExit, fmt.Errorf("unexpected handshake reply %d", t)
 	}
 
 	in := int(os.Stdin.Fd())
@@ -147,25 +171,45 @@ func Attach(m *session.Meta, detachKey []byte) error {
 		}
 	}()
 
-	// stdin -> holder, intercepting the detach key. We match every encoding
-	// variant of the key (e.g. Kitty CSI-u with or without the ";1" no-mod
-	// field) so F13-F20 detach works across kitty/wezterm/ghostty.
-	detachKeys := detachVariants(detachKey)
-	detached := make(chan struct{})
+	// stdin -> holder, intercepting the detach and switch keys. We match every
+	// encoding variant of each key (e.g. Kitty CSI-u with or without the ";1"
+	// no-mod field) so F13-F20 work across kitty/wezterm/ghostty.
+	//
+	// Each interceptor is tried in order; the earliest match in the chunk wins
+	// so a switch key is never swallowed by a later detach match (or vice
+	// versa). intent carries which action fired to the select below.
+	type interceptor struct {
+		keys   [][]byte
+		intent Outcome
+	}
+	interceptors := []interceptor{
+		{detachVariants(keys.Detach), OutcomeDetach},
+		{detachVariants(keys.SwitchPrev), OutcomeSwitchPrev},
+		{detachVariants(keys.SwitchNext), OutcomeSwitchNext},
+	}
+	stopped := make(chan Outcome, 1)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
 				chunk := buf[:n]
-				if len(detachKeys) != 0 {
-					if i, _ := indexAny(chunk, detachKeys); i >= 0 {
-						if i > 0 {
-							_ = cw.Write(proto.TInput, chunk[:i])
-						}
-						close(detached)
-						return
+				// Find the earliest interceptor match across all bindings.
+				hitIdx, hitIntent := -1, OutcomeExit
+				for _, ic := range interceptors {
+					if len(ic.keys) == 0 {
+						continue
 					}
+					if i, _ := indexAny(chunk, ic.keys); i >= 0 && (hitIdx == -1 || i < hitIdx) {
+						hitIdx, hitIntent = i, ic.intent
+					}
+				}
+				if hitIdx >= 0 {
+					if hitIdx > 0 {
+						_ = cw.Write(proto.TInput, chunk[:hitIdx])
+					}
+					stopped <- hitIntent
+					return
 				}
 				if err2 := cw.Write(proto.TInput, chunk); err2 != nil {
 					return
@@ -184,13 +228,13 @@ func Attach(m *session.Meta, detachKey []byte) error {
 			restore()
 		}
 		if code > 0 {
-			return &ExitError{Code: code}
+			return OutcomeExit, &ExitError{Code: code}
 		}
 		if code == -1 {
 			fmt.Fprintln(os.Stderr, "\r\npism: session ended.")
 		}
-		return nil
-	case <-detached:
+		return OutcomeExit, nil
+	case intent := <-stopped:
 		// The child (pi) is a full-screen TUI: it set a scroll region and a
 		// persistent status bar that it won't tear down (it doesn't know we
 		// left). Reset the terminal and clear so the shell prompt comes back
@@ -199,8 +243,10 @@ func Attach(m *session.Meta, detachKey []byte) error {
 		if raw {
 			restore()
 		}
-		fmt.Fprintf(os.Stderr, "[detached from %s]\r\n", short(m.ID))
-		return nil
+		if intent == OutcomeDetach {
+			fmt.Fprintf(os.Stderr, "[detached from %s]\r\n", short(m.ID))
+		}
+		return intent, nil
 	}
 }
 
