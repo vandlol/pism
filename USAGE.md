@@ -93,6 +93,33 @@ it never handles credentials.
    `./.pism/ssh_config` in the current directory (auto-detected)
 4. otherwise ssh's own defaults (`~/.ssh/config`)
 
+**See every host's sessions at once** — `pism ls --all` aggregates the local
+machine plus every ssh-config host that has pism into a single host-tagged table:
+
+```sh
+pism ls --all                        # local + all ssh-config hosts
+pism ls --all --include 'prod-*'     # only hosts matching prod-*
+pism ls --all --exclude ci-1,ci-2    # all except these
+pism ls --all --connect-timeout 5    # bound the per-host reachability probe
+```
+
+```
+HOST   ID        S     TOPIC                      DIR          AGE
+local  3f9a1c2b  live  design a caching layer     ~/proj/api   2h
+local  7c1d0e44  live  fix the flaky auth test    ~/proj/web   15m
+mac    a0b2f931  live  port the UI to resource…   ~/burger     1d
+srv    e4d5c6b7  dead  migrate the billing schema ~/billing    3d
+```
+
+Unreachable hosts and hosts without pism are noted on stderr and skipped (never
+failed). Under the hood each host runs `pism ls --porcelain` (a stable
+tab-separated `id⇥state⇥age⇥dir⇥topic` format you can also script against
+directly). Selection uses the same `--include`/`--exclude` globs as
+`update --all`.
+
+> This is a read-only view today — *attaching* to and *switching between* sessions
+> across hosts are the next steps on the roadmap.
+
 Installing pism on a remote host (`pism srv install`) and pushing a local binary
 (`pism push srv`) are covered in [INSTALL.md](INSTALL.md#install-on-a-remote-host).
 
@@ -103,7 +130,8 @@ Installing pism on a remote host (`pism srv install`) and pushing a local binary
 ```
 pism new [dir] [-d] [-w dur] [-- pi args...]  Start a new session (attaches unless -d;
                                       -w/--wait sets the ready timeout, 0=forever)
-pism ls                               List sessions with topic + liveness
+pism ls [--all] [--porcelain]         List sessions with topic + liveness
+                                      (--all aggregates every ssh host; see below)
 pism attach <id>                      Re-attach (id prefixes work: pism a 3f9a)
 pism kill <id> [id...]                Terminate session(s)
 pism gc                               Drop metadata for dead sessions

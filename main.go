@@ -224,11 +224,32 @@ func cmdNew(g globals, args []string) int {
 	return attachByID(g, id)
 }
 
-func cmdLs(g globals, _ []string) int {
-	rows, err := manager.Rows(g.topicLen)
+func cmdLs(g globals, args []string) int {
+	porcelain := false
+	all := false
+	for _, a := range args {
+		switch a {
+		case "--porcelain":
+			porcelain = true
+		case "--all", "--hosts", "--include", "--exclude", "--connect-timeout":
+			all = true
+		}
+	}
+	if all {
+		return cmdLsAll(g, args)
+	}
+	topicLen := g.topicLen
+	if porcelain {
+		topicLen = 1 << 20 // emit full topics; the consumer truncates for display
+	}
+	rows, err := manager.Rows(topicLen)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism ls:", err)
 		return 1
+	}
+	if porcelain {
+		ui.RenderPorcelain(os.Stdout, rows)
+		return 0
 	}
 	ui.Render(os.Stdout, rows)
 	return 0

@@ -295,6 +295,78 @@ func RunAll(o RunAllOptions) (int, error) {
 	return rc, nil
 }
 
+// HostResult is the outcome of running a pism subcommand on one host as part
+// of a capture fan-out (GatherAll).
+type HostResult struct {
+	Host    string
+	Stdout  []byte
+	Skipped bool   // host was unreachable or lacked pism
+	Reason  string // why it was skipped (for a note)
+	Err     error  // command ran but failed
+}
+
+// GatherAll enumerates + filters hosts like RunAll, probes each for pism, and
+// CAPTURES the stdout of `pism <Sub> <Args...>` on the reachable ones (instead
+// of streaming it). It powers aggregating commands such as `pism ls --all`.
+// Hosts that are unreachable or lack pism are returned as Skipped, not errors.
+func GatherAll(o RunAllOptions) ([]HostResult, error) {
+	if o.Sub == "" {
+		return nil, fmt.Errorf("GatherAll: empty subcommand")
+	}
+	hosts, err := ListConfigHosts(o.ConfigFile)
+	if err != nil {
+		return nil, fmt.Errorf("read ssh config: %w", err)
+	}
+	if len(hosts) == 0 {
+		return nil, fmt.Errorf("no hosts found in ssh config")
+	}
+	var targets []string
+	for _, h := range hosts {
+		if len(o.Include) > 0 && !MatchesAny(h, o.Include) {
+			continue
+		}
+		if MatchesAny(h, o.Exclude) {
+			continue
+		}
+		targets = append(targets, h)
+	}
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no hosts matched the include/exclude filters")
+	}
+
+	results := make([]HostResult, 0, len(targets))
+	for _, h := range targets {
+		has, perr := hasPism(h, o.ConfigFile, o.RemoteBin, o.ConnectTimeout)
+		if perr != nil {
+			results = append(results, HostResult{Host: h, Skipped: true, Reason: "unreachable over ssh"})
+			continue
+		}
+		if !has {
+			results = append(results, HostResult{Host: h, Skipped: true, Reason: "pism not installed"})
+			continue
+		}
+		out, rerr := capture(h, o.ConfigFile, o.RemoteBin, o.ConnectTimeout, append([]string{o.Sub}, o.Args...))
+		results = append(results, HostResult{Host: h, Stdout: out, Err: rerr})
+	}
+	return results, nil
+}
+
+// capture runs `ssh [-F cfg] host <bin> <args...>` and returns its stdout.
+func capture(host, cfg, remoteBin string, timeout int, args []string) ([]byte, error) {
+	bin := remoteBin
+	if bin == "" {
+		bin = "pism"
+	}
+	sshArgs := configArgs(cfg)
+	sshArgs = append(sshArgs, "-o", "BatchMode=yes")
+	if timeout > 0 {
+		sshArgs = append(sshArgs, "-o", fmt.Sprintf("ConnectTimeout=%d", timeout))
+	}
+	sshArgs = append(sshArgs, host, bin)
+	sshArgs = append(sshArgs, args...)
+	return exec.Command("ssh", sshArgs...).Output()
+}
+
 // hasPism probes a host for a usable pism binary over ssh. It uses BatchMode so
 // a host needing a password is skipped rather than hanging on a prompt.
 func hasPism(host, cfg, remoteBin string, timeout int) (bool, error) {
