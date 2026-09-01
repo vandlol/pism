@@ -4,6 +4,7 @@ package ui
 import (
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -27,7 +28,7 @@ func Render(w io.Writer, rows []manager.Row) {
 			shortID(r.Meta.ID),
 			state,
 			r.Topic,
-			r.Meta.Cwd,
+			abbrevHome(r.Meta.Cwd),
 			humanAge(r.Age),
 		})
 	}
@@ -61,6 +62,22 @@ func printRow(w io.Writer, cols []string, widths []int) {
 		}
 	}
 	fmt.Fprintln(w, strings.TrimRight(b.String(), " "))
+}
+
+// abbrevHome replaces a leading home directory with ~ for compact, non-
+// identifying paths.
+func abbrevHome(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if strings.HasPrefix(p, home+string(os.PathSeparator)) {
+		return "~" + p[len(home):]
+	}
+	return p
 }
 
 func shortID(id string) string {

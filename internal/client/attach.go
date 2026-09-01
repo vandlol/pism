@@ -104,6 +104,7 @@ func Attach(m *session.Meta, detachKey byte) error {
 
 	select {
 	case code := <-exitCode:
+		resetTerm(false)
 		if raw {
 			restore()
 		}
@@ -115,12 +116,42 @@ func Attach(m *session.Meta, detachKey byte) error {
 		}
 		return nil
 	case <-detached:
+		// The child (pi) is a full-screen TUI: it set a scroll region and a
+		// persistent status bar that it won't tear down (it doesn't know we
+		// left). Reset the terminal and clear so the shell prompt comes back
+		// clean instead of overprinting pi's leftover status bar.
+		resetTerm(true)
 		if raw {
 			restore()
 		}
-		fmt.Fprintf(os.Stderr, "\r\n[detached from %s]\r\n", short(m.ID))
+		fmt.Fprintf(os.Stderr, "[detached from %s]\r\n", short(m.ID))
 		return nil
 	}
+}
+
+// resetTerm returns the terminal to a sane state after a full-screen child.
+// It resets the scroll region and the modes a TUI commonly enables, shows the
+// cursor and resets attributes. When clear is true it also clears the screen
+// (used on detach so no status-bar remnants remain).
+func resetTerm(clear bool) {
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		return
+	}
+	var b []byte
+	b = append(b, "\x1b[r"...)        // reset scroll region (DECSTBM -> full)
+	b = append(b, "\x1b[?25h"...)     // show cursor
+	b = append(b, "\x1b[?2004l"...)   // bracketed paste off
+	b = append(b, "\x1b[?1000l"...)   // mouse tracking off
+	b = append(b, "\x1b[?1002l"...)
+	b = append(b, "\x1b[?1003l"...)
+	b = append(b, "\x1b[?1006l"...)
+	b = append(b, "\x1b[?2026l"...)   // synchronized-update off
+	b = append(b, "\x1b[?1049l"...)   // leave alternate screen (no-op if not set)
+	b = append(b, "\x1b[0m"...)       // reset attributes
+	if clear {
+		b = append(b, "\x1b[H\x1b[2J"...) // home + clear screen
+	}
+	_, _ = os.Stdout.Write(b)
 }
 
 // ExitError carries pi's exit code so the CLI can propagate it.

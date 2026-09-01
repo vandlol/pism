@@ -8,6 +8,8 @@ what's running where.
 
 No multiplexer, no status bar, no prefix keys. One static binary per host.
 
+![pism demo](assets/demo.gif)
+
 ```
 $ pism ls
 ID        S     TOPIC                                DIR                 AGE

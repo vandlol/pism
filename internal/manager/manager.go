@@ -3,6 +3,7 @@
 package manager
 
 import (
+	"fmt"
 	"os"
 	"time"
 
@@ -45,6 +46,20 @@ func Rows(topicLen int) ([]Row, error) {
 		})
 	}
 	return rows, nil
+}
+
+// NewestLive returns the most recently created session that is still live.
+func NewestLive() (*session.Meta, error) {
+	metas, err := session.List() // already sorted newest-first
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range metas {
+		if Alive(m) {
+			return m, nil
+		}
+	}
+	return nil, fmt.Errorf("no live sessions to attach to (start one with: pism new)")
 }
 
 // Kill asks a holder to terminate pi (graceful), falling back to signalling

@@ -220,8 +220,13 @@ func cmdLs(g globals, _ []string) int {
 
 func cmdAttach(g globals, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: pism attach <id>")
-		return 2
+		// No id: resume the most recently created live session.
+		m, err := manager.NewestLive()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "pism attach:", err)
+			return 1
+		}
+		return attachByID(g, m.ID)
 	}
 	return attachByID(g, args[0])
 }
