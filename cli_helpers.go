@@ -492,9 +492,13 @@ func isCommand(tok string) bool {
 }
 
 // isRemotable reports whether a subcommand can be run against a remote host.
+// update/self-update forward so `pism <host> update [--pre]` updates the
+// remote's own pism binary over ssh (it runs the remote's `pism update`,
+// which respects that host's configured channel unless overridden by flags).
 func isRemotable(tok string) bool {
 	switch tok {
-	case "new", "n", "ls", "list", "attach", "a", "kill", "k", "gc", "topic":
+	case "new", "n", "ls", "list", "attach", "a", "kill", "k", "gc", "topic",
+		"update", "self-update":
 		return true
 	}
 	return false
@@ -558,7 +562,8 @@ COMMANDS
   gc                               Remove metadata for dead sessions
   topic <id>                       Print a session's topic (for scripts)
   config [key] [value]             Show all keys, or get/set (--list, --unset, --path)
-  update [--pre|--stable]          Update pism in place (channel: stable|unstable)
+  update [--pre|--stable]          Update pism in place (channel: stable|unstable;
+                                   remote: pism <host> update updates that host)
   install <host>                   Install pism on a remote host over ssh
                                    (also: pism <host> install)
   logs <id>                        Print a session's holder log (diagnostics)
@@ -588,5 +593,6 @@ EXAMPLES
   pism srv ls                      list sessions on host 'srv' over ssh
   pism srv attach 3f9a             attach to a remote session on 'srv'
   pism srv new ~/svc               start a session on 'srv'
+  pism srv update --pre            update pism on host 'srv' over ssh
 `)
 }

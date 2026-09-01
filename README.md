@@ -119,7 +119,12 @@ pism srv ls                 # list sessions on host 'srv'
 pism srv new ~/svc          # start a session on 'srv'
 pism srv attach 3f9a        # attach to a remote session (live PTY over ssh -t)
 pism srv kill 3f9a          # kill a remote session
+pism srv update --pre       # update pism on host 'srv' over ssh
 ```
+
+`pism <host> update` runs the remote's own `pism update`, so it respects that
+host's configured channel unless you override it with `--pre` / `--stable` /
+`--update-url`.
 
 pism shells out to your system `ssh`, using your existing config, keys and agent —
 it never handles credentials.
@@ -279,6 +284,7 @@ pism config update-channel unstable   # or: stable / dev / nightly / latest
 pism update                           # respects the channel
 pism update --pre                     # one-off: grab the latest dev build
 pism update --stable                  # one-off: force stable
+pism srv update --pre                 # update pism on a remote host over ssh
 ```
 
 Pre-releases come from merges into `dev`; stable releases from merges into `main`
