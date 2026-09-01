@@ -79,6 +79,12 @@ func applyConfig(g *globals, cfg *config.Config) {
 	if v, ok := cfg.Get("detach-key"); ok {
 		g.detachStr = v
 	}
+	if v, ok := cfg.Get("switch-prev-key"); ok {
+		g.switchPrev = v
+	}
+	if v, ok := cfg.Get("switch-next-key"); ok {
+		g.switchNext = v
+	}
 	if v, ok := cfg.Get("remote-bin"); ok {
 		g.remoteBin = v
 	}
@@ -271,6 +277,16 @@ func extractGlobals(argv []string, g *globals) ([]string, error) {
 				return nil, err
 			}
 			g.setDetach = true
+		case "--switch-prev-key":
+			if g.switchPrev, err = get(key); err != nil {
+				return nil, err
+			}
+			g.setSwitch = true
+		case "--switch-next-key":
+			if g.switchNext, err = get(key); err != nil {
+				return nil, err
+			}
+			g.setSwitch = true
 		case "--topic-len":
 			s, e := get(key)
 			if e != nil {
@@ -334,6 +350,9 @@ func parseDetach(s string) []byte {
 	if seq, ok := functionKeys[lower]; ok {
 		return []byte(seq)
 	}
+	if seq, ok := namedKeys[lower]; ok {
+		return []byte(seq)
+	}
 	if seq, ok := parseEscapeSpec(s); ok {
 		return seq
 	}
@@ -353,6 +372,43 @@ func parseDetach(s string) []byte {
 	return []byte{client_DefaultDetach}
 }
 
+// parseSwitch turns a session-switch key spec into a byte sequence, reusing
+// the same grammar as parseDetach (named keys like ctrl-left, function keys,
+// escape specs, ctrl-<char>, codes, literals). Empty/"none" disables it, and
+// an unrecognized spec disables it with a warning rather than colliding with a
+// bogus default.
+func parseSwitch(s string) []byte {
+	s = strings.TrimSpace(s)
+	switch strings.ToLower(s) {
+	case "", "none", "off", "disable", "disabled":
+		return nil
+	}
+	lower := strings.ToLower(s)
+	if seq, ok := namedKeys[lower]; ok {
+		return []byte(seq)
+	}
+	if seq, ok := functionKeys[lower]; ok {
+		return []byte(seq)
+	}
+	if seq, ok := parseEscapeSpec(s); ok {
+		return seq
+	}
+	if n, err := strconv.Atoi(s); err == nil && n >= 0 && n < 256 {
+		return []byte{byte(n)}
+	}
+	if strings.HasPrefix(lower, "ctrl-") && len(s) == 6 {
+		return []byte{ctrlByte(s[5])}
+	}
+	if strings.HasPrefix(s, "^") && len(s) == 2 {
+		return []byte{ctrlByte(s[1])}
+	}
+	if len(s) == 1 {
+		return []byte{s[0]}
+	}
+	fmt.Fprintf(os.Stderr, "pism: unrecognized switch key %q; disabling it\n", s)
+	return nil
+}
+
 // functionKeys maps function-key names to the escape sequences terminals emit.
 // F1-F12 use the classic xterm sequences. F13-F20 use the Kitty keyboard
 // protocol CSI-u encoding (CSI <code> u), because that is what a modern
@@ -367,6 +423,17 @@ var functionKeys = map[string]string{
 	"f9": "\x1b[20~", "f10": "\x1b[21~", "f11": "\x1b[23~", "f12": "\x1b[24~",
 	"f13": "\x1b[57376u", "f14": "\x1b[57377u", "f15": "\x1b[57378u", "f16": "\x1b[57379u",
 	"f17": "\x1b[57380u", "f18": "\x1b[57381u", "f19": "\x1b[57382u", "f20": "\x1b[57383u",
+}
+
+// namedKeys maps friendly modifier+arrow names to the xterm escape sequences
+// terminals emit for them (CSI 1 ; <mod> <final>, mod 5 = Ctrl, 3 = Alt,
+// 2 = Shift). These are the defaults for session-switch keys and are handy as
+// a detach key too. Plain arrows are included for completeness.
+var namedKeys = map[string]string{
+	"up": "\x1b[A", "down": "\x1b[B", "right": "\x1b[C", "left": "\x1b[D",
+	"ctrl-up": "\x1b[1;5A", "ctrl-down": "\x1b[1;5B", "ctrl-right": "\x1b[1;5C", "ctrl-left": "\x1b[1;5D",
+	"alt-up": "\x1b[1;3A", "alt-down": "\x1b[1;3B", "alt-right": "\x1b[1;3C", "alt-left": "\x1b[1;3D",
+	"shift-up": "\x1b[1;2A", "shift-down": "\x1b[1;2B", "shift-right": "\x1b[1;2C", "shift-left": "\x1b[1;2D",
 }
 
 // parseEscapeSpec accepts a literal escape sequence written as text, so users
@@ -485,7 +552,8 @@ COMMANDS
   new [dir] [-d] [-w <dur>] [-- pi args]  Start a session (attaches unless -d;
                                           -w/--wait sets ready timeout, 0=forever)
   ls                               List sessions with their topic + liveness
-  attach <id>                      Re-attach to a session (detach: Ctrl-\ )
+  attach <id>                      Re-attach to a session (detach: Ctrl-\ ;
+                                   switch sessions: Ctrl-Left / Ctrl-Right)
   kill <id> [id...]                Terminate session(s)
   gc                               Remove metadata for dead sessions
   topic <id>                       Print a session's topic (for scripts)
@@ -506,6 +574,8 @@ FLAGS
   --pi <cmd>             Command used to launch pi (default: pi)
   --detach-key <spec>    Detach key: ^\ , ctrl-o, f16, a char, a code,
                          an escape seq (\x1b[29~), or "none"
+  --switch-prev-key <spec>  Attach to previous live session (default: ctrl-left)
+  --switch-next-key <spec>  Attach to next live session (default: ctrl-right)
   --topic-len <n>        Max topic width in ls (default: 40)
   --dist <dir>           Output/dir for build-all & push (default: dist)
   -v / -vv / -vvv        Verbosity: info / debug / trace (holder logs land in
