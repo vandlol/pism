@@ -1,10 +1,11 @@
 name: ci
 
+# Validate every PR into dev or main (and pushes to those branches).
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
 
 jobs:
   build:
@@ -25,10 +26,3 @@ jobs:
 
       - name: Cross-compile all targets
         run: make dist
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: pism-binaries
-          path: dist/pism-*
-          if-no-files-found: error

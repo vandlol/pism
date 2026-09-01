@@ -63,18 +63,38 @@ func parseWait(s string) time.Duration {
 // $PISM_UPDATE_URL, or --update-url).
 func cmdUpdate(args []string) int {
 	base := os.Getenv("PISM_UPDATE_URL")
+	channel := os.Getenv("PISM_UPDATE_CHANNEL")
 	if cfg, err := config.Load(); err == nil {
 		if v, ok := cfg.Get("update-url"); ok && base == "" {
 			base = v
 		}
-	}
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--update-url" && i+1 < len(args) {
-			base = args[i+1]
-			i++
+		if v, ok := cfg.Get("update-channel"); ok && channel == "" {
+			channel = v
 		}
 	}
-	if err := update.Run(base, version); err != nil {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--update-url":
+			if i+1 < len(args) {
+				base = args[i+1]
+				i++
+			}
+		case "--channel":
+			if i+1 < len(args) {
+				channel = args[i+1]
+				i++
+			}
+		case "--pre", "--unstable", "--dev", "--nightly":
+			channel = "unstable"
+		case "--stable":
+			channel = "stable"
+		}
+	}
+	if err := update.Run(update.Options{
+		CurrentVersion: version,
+		Channel:        update.NormalizeChannel(channel),
+		BaseURL:        base,
+	}); err != nil {
 		fmt.Fprintln(os.Stderr, "pism update:", err)
 		return 1
 	}
@@ -314,7 +334,7 @@ COMMANDS
   gc                               Remove metadata for dead sessions
   topic <id>                       Print a session's topic (for scripts)
   config <key> [value]             Get/set config (--list, --unset <k>, --path)
-  update                           Update pism in place from the update server
+  update [--pre|--stable]          Update pism in place (channel: stable|unstable)
   push <host> [dest]               Copy the matching pism binary to a host
   build-all                        Cross-compile binaries into ./dist
   version

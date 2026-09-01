@@ -1,38 +1,75 @@
 name: release
 
+# Every merge of dev -> main cuts a stable release. Default bump is MINOR;
+# override on the PR with a label:
+#   release:major  -> major bump
+#   release:minor  -> minor bump (default)
+#   release:patch  -> patch bump
 on:
-  push:
-    tags: ['v*']
+  pull_request:
+    types: [closed]
+    branches: [main]
 
 permissions:
-  contents: write # needed to create releases and upload assets
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
 
 jobs:
   release:
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # tags for `git describe`
+          ref: main
+          fetch-depth: 0 # all tags for version computation
 
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
           cache: true
 
-      - name: Build all platforms (version from tag)
-        run: make dist VERSION=${{ github.ref_name }}
+      - name: Determine bump from PR labels (default: minor)
+        id: bump
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          bump=minor
+          case ",$LABELS," in
+            *,release:major,*) bump=major ;;
+            *,release:patch,*) bump=patch ;;
+            *,release:minor,*) bump=minor ;;
+          esac
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+          echo "labels: $LABELS -> bump: $bump"
+
+      - name: Compute next version
+        id: ver
+        run: |
+          V=$(sh scripts/next-version.sh ${{ steps.bump.outputs.bump }})
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "next stable: $V"
+
+      - name: Tag
+        run: |
+          git tag "${{ steps.ver.outputs.version }}"
+          git push origin "${{ steps.ver.outputs.version }}"
+
+      - name: Build all platforms
+        run: make dist VERSION=${{ steps.ver.outputs.version }}
 
       - name: Checksums
-        run: |
-          cd dist
-          sha256sum pism-* > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+        run: cd dist && sha256sum pism-* > SHA256SUMS.txt
 
-      - name: Create GitHub release + upload assets
+      - name: Publish stable release
         uses: softprops/action-gh-release@v2
         with:
-          name: pism ${{ github.ref_name }}
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: pism ${{ steps.ver.outputs.version }}
+          prerelease: false
           generate_release_notes: true
           files: |
             dist/pism-*

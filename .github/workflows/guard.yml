@@ -1,0 +1,23 @@
+name: guard
+
+# Enforce the branch policy: the ONLY branch allowed to open a PR into main is
+# dev. (GitHub branch protection can require a PR but can't restrict its source
+# branch, so we check it here.)
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
+
+jobs:
+  only-dev-into-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require head branch == dev
+        run: |
+          head="${{ github.head_ref }}"
+          echo "PR into main from: $head"
+          if [ "$head" != "dev" ]; then
+            echo "::error::PRs into main must come from 'dev' (got '$head'). Open your PR against 'dev' instead."
+            exit 1
+          fi
+          echo "OK: main only receives merges from dev."

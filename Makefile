@@ -2,7 +2,7 @@ BINARY := pism
 DIST := dist
 PKG := github.com/vandlol/pism
 
-# Version: current git tag/description, overridable: make VERSION=v1.2.3
+# Version: current git tag/description, overridable: make VERSION=1.2.3
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 

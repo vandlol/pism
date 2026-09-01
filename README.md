@@ -1,7 +1,7 @@
 # pism — pi session manager
 
 A cross-platform (**Linux · macOS · Windows**), **tmux-free** session manager for
-[pi](https://github.com/). It keeps pi running in detached PTY holders so you can
+[pi](https://pi.dev). It keeps pi running in detached PTY holders so you can
 disconnect and re-attach reliably — **locally or over SSH** — and it lists every
 session by its **topic** (the conversation's first message), so you always know
 what's running where.
@@ -169,7 +169,8 @@ Any of `ls new attach kill gc topic` can be prefixed with a host to run remotely
 --detach-key <spec>    detach key: ^\ , ctrl-o, a char, a code, or "none"
 --topic-len <n>        max topic width in `ls` (default: 40)
 --ssh-config <path>    ssh config file to use (-F)
---update-url <url>     base URL for `pism update`
+--update-url <url>     custom base URL for `pism update` (overrides channel)
+--pre / --stable       one-off update channel for `pism update`
 --dist <dir>           output/source dir for build-all & push (default: dist)
 ```
 
@@ -214,7 +215,7 @@ pism config --unset pi             # remove
 pism config --path                 # print the file path
 ```
 
-**Keys:** `pi`, `detach-key`, `topic-len`, `remote-bin`, `ssh-config`, `update-url`.
+**Keys:** `pi`, `detach-key`, `topic-len`, `remote-bin`, `ssh-config`, `update-url`, `update-channel`, `ready-timeout`.
 
 **Precedence:** command-line flag **>** config file **>** built-in default.
 Config is per-machine and is *not* pushed to remote hosts (each host reads its own).
@@ -226,20 +227,30 @@ The file is plain, hand-editable `key = value` with `#` comments.
 ## Self-update
 
 ```sh
-pism update
+pism update            # update on your configured channel
 ```
 
-Downloads the build matching your platform from the update server (the same Mac by
-default), validates it runs, and swaps it in atomically (rename on Unix; move-aside
-+ rename on Windows). Repoint it anywhere:
+Downloads the matching build from GitHub releases, validates it runs, and swaps it
+in atomically (rename on Unix; move-aside + rename on Windows).
 
-```
---update-url <url>  >  $PISM_UPDATE_URL  >  config update-url  >  built-in default
-```
+### Channels
+
+| Channel | Gets | How |
+|---------|------|-----|
+| **stable** (default, aka `latest`) | newest **non-pre-release** | `…/releases/latest/download` |
+| **unstable** (aka `dev` / `nightly`) | newest release **incl. pre-releases** | GitHub API |
 
 ```sh
-pism config update-url https://releases.example.com/pism
+pism config update-channel unstable   # or: stable / dev / nightly / latest
+pism update                           # respects the channel
+pism update --pre                     # one-off: grab the latest dev build
+pism update --stable                  # one-off: force stable
 ```
+
+Pre-releases come from merges into `dev`; stable releases from merges into `main`
+(see [CONTRIBUTING.md](CONTRIBUTING.md)). Override the source entirely with
+`--update-url` / `$PISM_UPDATE_URL` / `config update-url`, or point at a different
+repo with `$PISM_UPDATE_REPO`.
 
 ---
 
@@ -263,12 +274,11 @@ Targets built by `build-all`/`make dist`: `linux/amd64`, `linux/arm64`,
 and attaches the binaries (plus `SHA256SUMS.txt`) to a GitHub Release. Clients
 then get it via `pism update` or the install script.
 
-```sh
-git tag v0.2.0
-git push origin v0.2.0     # triggers .github/workflows/release.yml
-```
-
-The version is baked into the binary from the tag (`pism version`).
+Releases are automated from the branch flow — you don't tag by hand. Merging a
+PR into `dev` publishes a **patch pre-release**; merging `dev` into `main`
+publishes a **minor** (or **major**, via a `release:major` label) **stable**
+release. Tags are plain SemVer (no `v` prefix) and baked into the binary
+(`pism version`). See [CONTRIBUTING.md](CONTRIBUTING.md) for the full model.
 
 ---
 

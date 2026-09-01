@@ -27,7 +27,8 @@ var Keys = []struct{ Name, Desc string }{
 	{"topic-len", "max topic width in ls (default: 40)"},
 	{"remote-bin", "pism path on remote hosts (default: pism)"},
 	{"ssh-config", "ssh config file to pass as -F (default: auto/none)"},
-	{"update-url", "base URL for `pism update` binaries (default: this Mac)"},
+	{"update-url", "custom base URL for `pism update` (overrides channel)"},
+	{"update-channel", "update channel: stable|latest, or unstable|dev|nightly (pre-releases)"},
 	{"ready-timeout", "how long `new` waits for pi to come up (e.g. 30s, 5m, 0=forever)"},
 }
 
@@ -137,6 +138,13 @@ func (c *Config) Set(key, val string) error {
 	if key == "topic-len" {
 		if _, err := strconv.Atoi(val); err != nil {
 			return fmt.Errorf("topic-len must be an integer: %v", err)
+		}
+	}
+	if key == "update-channel" {
+		switch strings.ToLower(val) {
+		case "stable", "latest", "unstable", "dev", "nightly":
+		default:
+			return fmt.Errorf("update-channel must be one of: stable, latest, unstable, dev, nightly")
 		}
 	}
 	c.values[key] = val

@@ -1,0 +1,57 @@
+name: release-dev
+
+# Every merge into dev cuts a PATCH pre-release: builds all platforms and
+# publishes a GitHub *pre-release* (so `pism update` on the stable channel
+# ignores it, while `pism update --pre` picks it up).
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-dev
+  cancel-in-progress: false
+
+jobs:
+  prerelease:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # all tags for version computation
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Compute next patch version
+        id: ver
+        run: |
+          V=$(sh scripts/next-version.sh patch)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "next pre-release: $V"
+
+      - name: Tag
+        run: |
+          git tag "${{ steps.ver.outputs.version }}"
+          git push origin "${{ steps.ver.outputs.version }}"
+
+      - name: Build all platforms
+        run: make dist VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Checksums
+        run: cd dist && sha256sum pism-* > SHA256SUMS.txt
+
+      - name: Publish pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: pism ${{ steps.ver.outputs.version }}
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            dist/pism-*
+            dist/SHA256SUMS.txt
