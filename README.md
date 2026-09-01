@@ -126,22 +126,29 @@ pism srv update --pre       # update pism on host 'srv' over ssh
 host's configured channel unless you override it with `--pre` / `--stable` /
 `--update-url`.
 
-**Update every host at once** — `pism update --all` enumerates the hosts in your
-ssh config, probes each for a pism binary, and updates the ones that have it
-(unreachable hosts or hosts without pism are skipped, not failed):
+**Fan out across every host at once** — both `pism update` and `pism config`
+take an `--all` flag that enumerates the hosts in your ssh config, probes each
+for a pism binary, and runs the command on the ones that have it (unreachable
+hosts or hosts without pism are skipped, not failed):
 
 ```sh
-pism update --all                       # all ssh-config hosts with pism
+pism update --all                       # update every ssh-config host with pism
 pism update --all --pre                 # ...on the unstable channel
 pism update --all --include 'prod-*'    # only hosts matching prod-*
 pism update --all --exclude ci-1,ci-2   # all except these
 pism config update-exclude 'ci-*,lab'   # persist a skip list
+
+pism config --all update-channel unstable   # set a key on every host
+pism config --all update-channel             # read the key from every host
+pism config --all --include 'prod-*' pi /opt/homebrew/bin/pi
 ```
 
+- Works for `update` and `config`; the same host-selection flags apply to both.
 - `--include` / `--exclude` take comma/space-separated **glob** patterns
   (`*`, `?`) and may be repeated; excludes always win over includes.
-- Any other `update` flag (`--pre`, `--stable`, `--update-url`) is forwarded to
-  each remote update.
+- Everything after the selection flags is forwarded verbatim to each remote —
+  the `update` channel flags (`--pre`, `--stable`, `--update-url`), or the
+  `config` key/value.
 - `--connect-timeout <secs>` bounds the reachability probe (default 10).
 
 pism shells out to your system `ssh`, using your existing config, keys and agent —
@@ -304,6 +311,7 @@ pism update --pre                     # one-off: grab the latest dev build
 pism update --stable                  # one-off: force stable
 pism srv update --pre                 # update pism on a remote host over ssh
 pism update --all                     # update every ssh-config host with pism
+pism config --all update-channel unstable  # set a key on every host
 ```
 
 Pre-releases come from merges into `dev`; stable releases from merges into `main`

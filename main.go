@@ -84,7 +84,7 @@ func run(argv []string) int {
 	case "build-all":
 		return cmdBuildAll(g, args)
 	case "config":
-		return cmdConfig(args)
+		return cmdConfig(g, args)
 	case "update", "self-update":
 		return cmdUpdate(g, args)
 	case "install":

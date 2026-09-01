@@ -128,7 +128,7 @@ func parseWait(s string) time.Duration {
 // With --all / --hosts / --include / --exclude it instead fans out over the
 // ssh-config hosts, updating each one that has pism installed.
 func cmdUpdate(g globals, args []string) int {
-	if hasUpdateHostMode(args) {
+	if hasAllHostsMode(args) {
 		return cmdUpdateHosts(g, args)
 	}
 	base := os.Getenv("PISM_UPDATE_URL")
@@ -170,8 +170,8 @@ func cmdUpdate(g globals, args []string) int {
 	return 0
 }
 
-// hasUpdateHostMode reports whether any multi-host trigger flag is present.
-func hasUpdateHostMode(args []string) bool {
+// hasAllHostsMode reports whether any multi-host fan-out trigger flag is present.
+func hasAllHostsMode(args []string) bool {
 	for _, a := range args {
 		key, _, _ := splitFlag(a)
 		switch key {
@@ -182,23 +182,26 @@ func hasUpdateHostMode(args []string) bool {
 	return false
 }
 
-// cmdUpdateHosts fans `pism update` out across ssh-config hosts. By default it
-// targets every concrete Host in the config; --include narrows to a set and
-// --exclude removes hosts (both accept comma/space-separated glob patterns and
-// may repeat). Remaining update flags (--pre, --stable, --update-url, …) are
-// forwarded verbatim to each remote update.
-func cmdUpdateHosts(g globals, args []string) int {
-	var include, exclude []string
-	var passthrough []string
-	timeout := 10
+// allHostsSel holds the parsed host-selection flags shared by the fan-out
+// commands, plus the leftover args that should be forwarded to each remote.
+type allHostsSel struct {
+	include     []string
+	exclude     []string
+	timeout     int
+	passthrough []string
+}
 
-	// Seed persistent excludes from config.
+// parseAllHostsFlags pulls the common fan-out selection flags (--all/--hosts,
+// --include, --exclude, --connect-timeout) out of args, seeding excludes from
+// the persistent update-exclude config key. Everything else is returned as
+// passthrough (forwarded verbatim to the remote subcommand).
+func parseAllHostsFlags(args []string) allHostsSel {
+	sel := allHostsSel{timeout: 10}
 	if cfg, err := config.Load(); err == nil {
 		if v, ok := cfg.Get("update-exclude"); ok {
-			exclude = append(exclude, splitList(v)...)
+			sel.exclude = append(sel.exclude, splitList(v)...)
 		}
 	}
-
 	for i := 0; i < len(args); i++ {
 		key, val, inline := splitFlag(args[i])
 		take := func() string {
@@ -215,28 +218,61 @@ func cmdUpdateHosts(g globals, args []string) int {
 		case "--all", "--hosts":
 			// selection trigger only; no value
 		case "--include":
-			include = append(include, splitList(take())...)
+			sel.include = append(sel.include, splitList(take())...)
 		case "--exclude":
-			exclude = append(exclude, splitList(take())...)
+			sel.exclude = append(sel.exclude, splitList(take())...)
 		case "--connect-timeout":
 			if n, err := strconv.Atoi(take()); err == nil && n >= 0 {
-				timeout = n
+				sel.timeout = n
 			}
 		default:
-			passthrough = append(passthrough, args[i])
+			sel.passthrough = append(sel.passthrough, args[i])
 		}
 	}
+	return sel
+}
 
-	code, err := remote.UpdateAll(remote.UpdateAllOptions{
+// cmdUpdateHosts fans `pism update` out across ssh-config hosts. By default it
+// targets every concrete Host in the config; --include narrows to a set and
+// --exclude removes hosts (both accept comma/space-separated glob patterns and
+// may repeat). Remaining update flags (--pre, --stable, --update-url, …) are
+// forwarded verbatim to each remote update.
+func cmdUpdateHosts(g globals, args []string) int {
+	sel := parseAllHostsFlags(args)
+	code, err := remote.RunAll(remote.RunAllOptions{
 		ConfigFile:     remote.ResolveConfig(g.sshConfig),
 		RemoteBin:      g.remoteBin,
-		Include:        include,
-		Exclude:        exclude,
-		Args:           passthrough,
-		ConnectTimeout: timeout,
+		Include:        sel.include,
+		Exclude:        sel.exclude,
+		Sub:            "update",
+		Args:           sel.passthrough,
+		ConnectTimeout: sel.timeout,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism update:", err)
+		return 1
+	}
+	return code
+}
+
+// cmdConfigHosts fans `pism config` out across ssh-config hosts, so a config
+// key can be read or set on every host at once (e.g. keep the whole fleet on
+// the same update-channel). Uses the same --all/--include/--exclude selection
+// as update; the remaining args (the config key and optional value) are passed
+// verbatim to each remote `pism config`.
+func cmdConfigHosts(g globals, args []string) int {
+	sel := parseAllHostsFlags(args)
+	code, err := remote.RunAll(remote.RunAllOptions{
+		ConfigFile:     remote.ResolveConfig(g.sshConfig),
+		RemoteBin:      g.remoteBin,
+		Include:        sel.include,
+		Exclude:        sel.exclude,
+		Sub:            "config",
+		Args:           sel.passthrough,
+		ConnectTimeout: sel.timeout,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pism config:", err)
 		return 1
 	}
 	return code
@@ -257,8 +293,13 @@ func splitList(s string) []string {
 	return out
 }
 
-// cmdConfig implements the git-style `pism config` command.
-func cmdConfig(args []string) int {
+// cmdConfig implements the git-style `pism config` command. With a fan-out
+// trigger flag (--all/--hosts/--include/--exclude) it instead reads or sets the
+// config key on every ssh-config host that has pism installed.
+func cmdConfig(g globals, args []string) int {
+	if hasAllHostsMode(args) {
+		return cmdConfigHosts(g, args)
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism config:", err)
@@ -655,6 +696,8 @@ COMMANDS
   gc                               Remove metadata for dead sessions
   topic <id>                       Print a session's topic (for scripts)
   config [key] [value]             Show all keys, or get/set (--list, --unset, --path)
+  config --all [key] [value]       Get/set a config key on every ssh-config host
+                                   (same --include/--exclude selection as update)
   update [--pre|--stable]          Update pism in place (channel: stable|unstable;
                                    remote: pism <host> update updates that host)
   update --all [--include globs]   Update every ssh-config host that has pism
@@ -692,5 +735,6 @@ EXAMPLES
   pism srv update --pre            update pism on host 'srv' over ssh
   pism update --all                update every ssh-config host that has pism
   pism update --all --exclude ci-* update all hosts except those matching ci-*
+  pism config --all update-channel unstable   set a config key on every host
 `)
 }
