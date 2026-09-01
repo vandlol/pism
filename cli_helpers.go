@@ -11,6 +11,7 @@ import (
 
 	"github.com/vandlol/pism/internal/config"
 	"github.com/vandlol/pism/internal/remote"
+	"github.com/vandlol/pism/internal/session"
 	"github.com/vandlol/pism/internal/update"
 )
 
@@ -34,6 +35,29 @@ func runInstall(g globals, host string, args []string) int {
 		fmt.Fprintln(os.Stderr, "pism install:", err)
 		return 1
 	}
+	return 0
+}
+
+// cmdLogs prints a session's holder log (verbose diagnostics land here).
+func cmdLogs(g globals, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: pism logs <id>")
+		return 2
+	}
+	m, err := session.Load(args[0])
+	path := ""
+	if err == nil {
+		path = session.LogPath(m.ID)
+	} else {
+		// allow dumping by a raw/full id even if metadata is already gone
+		path = session.LogPath(args[0])
+	}
+	b, rerr := os.ReadFile(path)
+	if rerr != nil {
+		fmt.Fprintf(os.Stderr, "pism logs: %v\n", rerr)
+		return 1
+	}
+	os.Stdout.Write(b)
 	return 0
 }
 
@@ -196,6 +220,11 @@ func extractGlobals(argv []string, g *globals) ([]string, error) {
 			rest = append(rest, argv[i:]...)
 			break
 		}
+		// -v / -vv / -vvv : verbosity by counting v's
+		if len(a) >= 2 && a[0] == '-' && a[1] == 'v' && strings.Trim(a, "-v") == "" {
+			g.verbosity = len(a) - 1
+			continue
+		}
 		key, inlineVal, hasInline := splitFlag(a)
 		var err error
 		val := inlineVal
@@ -235,6 +264,16 @@ func extractGlobals(argv []string, g *globals) ([]string, error) {
 			}
 			g.topicLen = n
 			g.setTopicLen = true
+		case "--verbose":
+			s, e := get(key)
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(s)
+			if e2 != nil {
+				return nil, fmt.Errorf("--verbose: %v", e2)
+			}
+			g.verbosity = n
 		case "--dist":
 			if g.dist, err = get(key); err != nil {
 				return nil, err
@@ -370,6 +409,7 @@ COMMANDS
   update [--pre|--stable]          Update pism in place (channel: stable|unstable)
   install <host>                   Install pism on a remote host over ssh
                                    (also: pism <host> install)
+  logs <id>                        Print a session's holder log (diagnostics)
   push <host> [dest]               Copy the matching pism binary to a host
   build-all                        Cross-compile binaries into ./dist
   version
@@ -383,6 +423,8 @@ FLAGS
   --detach-key <spec>    Detach key: ^\ , ctrl-o, a char, a code, or "none"
   --topic-len <n>        Max topic width in ls (default: 40)
   --dist <dir>           Output/dir for build-all & push (default: dist)
+  -v / -vv / -vvv        Verbosity: info / debug / trace (holder logs land in
+                         the session log; see: pism logs <id>)
 
 EXAMPLES
   pism new ~/proj                  start + attach a session in ~/proj
