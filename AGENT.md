@@ -31,13 +31,5 @@ add, change, or remove a command, flag, or config key, update **all three**:
 > config-key set incl. `update-channel`/`update-exclude`/`ready-timeout`). Keep
 > them in sync on every capability change.
 
-## Build & verify
-
-```sh
-make vet test     # go vet + go test
-make build        # -> ./pism
-./pism help       # sanity-check the help text after doc changes
-```
-
-Cross-compile with `make dist` (or `pism build-all`). Releases are automated from
-the branch flow — do not tag by hand (see CONTRIBUTING.md).
+For the build/verify workflow, release model, and branch rules, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
