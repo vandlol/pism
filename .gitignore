@@ -1,0 +1,8 @@
+# build outputs
+/pism
+/pism.exe
+/dist/
+
+# editor / OS cruft
+.DS_Store
+*.swp

@@ -1,0 +1,207 @@
+// Package holder implements the detached per-session process that owns a PTY
+// running pi and keeps it alive across client (dis)connections.
+package holder
+
+import (
+	"errors"
+	"net"
+	"os"
+	"os/exec"
+	"sync"
+	"time"
+
+	"github.com/aymanbagabas/go-pty"
+
+	"github.com/vandlol/pism/internal/proto"
+	"github.com/vandlol/pism/internal/session"
+	"github.com/vandlol/pism/internal/transport"
+)
+
+const ringMax = 256 * 1024 // replay buffer sent to newly-attached clients
+
+// Config for a holder run (parsed from the hidden __holder subcommand).
+type Config struct {
+	ID        string
+	Cwd       string
+	PiCmd     string
+	ExtraArgs []string
+}
+
+type client struct{ w *proto.ConnWriter }
+
+type Holder struct {
+	cfg  Config
+	meta *session.Meta
+	pty  pty.Pty
+	cmd  *pty.Cmd
+
+	mu      sync.Mutex
+	clients map[*client]struct{}
+	ring    []byte
+	lastW   int // last known cols
+	lastH   int // last known rows
+}
+
+// Run is the holder main loop. It blocks until pi exits, then cleans up.
+func Run(cfg Config) error {
+	if _, err := session.EnsureSessionsDir(); err != nil {
+		return err
+	}
+	h := &Holder{cfg: cfg, clients: map[*client]struct{}{}, lastW: 80, lastH: 24}
+
+	p, err := pty.New()
+	if err != nil {
+		return err
+	}
+	h.pty = p
+	defer p.Close()
+
+	args := append([]string{"--session-id", cfg.ID}, cfg.ExtraArgs...)
+	c := p.Command(cfg.PiCmd, args...)
+	c.Dir = cfg.Cwd
+	c.Env = append(os.Environ(), "PISM_SESSION="+cfg.ID)
+	if err := c.Start(); err != nil {
+		return err
+	}
+	h.cmd = c
+	_ = p.Resize(h.lastW, h.lastH)
+
+	endpoint := transport.Endpoint(cfg.ID)
+	l, err := transport.Listen(endpoint)
+	if err != nil {
+		_ = c.Process.Kill()
+		return err
+	}
+
+	h.meta = &session.Meta{
+		ID:       cfg.ID,
+		PID:      os.Getpid(),
+		Cmd:      cfg.PiCmd,
+		Args:     cfg.ExtraArgs,
+		Cwd:      cfg.Cwd,
+		Endpoint: endpoint,
+		Token:    session.NewToken(),
+		Created:  time.Now(),
+	}
+	if err := h.meta.Save(); err != nil {
+		_ = c.Process.Kill()
+		l.Close()
+		return err
+	}
+
+	go h.acceptLoop(l)
+	go h.readLoop()
+
+	code := 0
+	if werr := c.Wait(); werr != nil {
+		var ee *exec.ExitError
+		if errors.As(werr, &ee) {
+			code = ee.ExitCode()
+		} else {
+			code = 1
+		}
+	}
+
+	h.broadcast(proto.TExit, proto.EncodeExit(code))
+	time.Sleep(120 * time.Millisecond) // let clients flush the exit frame
+	l.Close()
+	transport.Cleanup(endpoint)
+	h.meta.Remove()
+	return nil
+}
+
+// readLoop pumps pty output to the ring buffer and all attached clients.
+func (h *Holder) readLoop() {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := h.pty.Read(buf)
+		if n > 0 {
+			h.appendRing(buf[:n])
+			h.broadcast(proto.TOutput, buf[:n])
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (h *Holder) appendRing(b []byte) {
+	h.mu.Lock()
+	h.ring = append(h.ring, b...)
+	if len(h.ring) > ringMax {
+		h.ring = h.ring[len(h.ring)-ringMax:]
+	}
+	h.mu.Unlock()
+}
+
+func (h *Holder) broadcast(t byte, payload []byte) {
+	h.mu.Lock()
+	for c := range h.clients {
+		_ = c.w.Write(t, payload)
+	}
+	h.mu.Unlock()
+}
+
+func (h *Holder) acceptLoop(l net.Listener) {
+	for {
+		nc, err := l.Accept()
+		if err != nil {
+			return
+		}
+		go h.handle(nc)
+	}
+}
+
+func (h *Holder) handle(nc net.Conn) {
+	defer nc.Close()
+
+	t, payload, err := proto.ReadFrame(nc)
+	if err != nil {
+		return
+	}
+	if t != proto.THello || string(payload) != h.meta.Token {
+		_ = proto.WriteFrame(nc, proto.TError, []byte("unauthorized"))
+		return
+	}
+	cw := proto.NewConnWriter(nc)
+	if err := cw.Write(proto.THelloOK, nil); err != nil {
+		return
+	}
+
+	cl := &client{w: cw}
+	h.mu.Lock()
+	snap := make([]byte, len(h.ring))
+	copy(snap, h.ring)
+	h.clients[cl] = struct{}{}
+	h.mu.Unlock()
+
+	if len(snap) > 0 {
+		_ = cw.Write(proto.TOutput, snap)
+	}
+
+	for {
+		mt, mp, err := proto.ReadFrame(nc)
+		if err != nil {
+			break
+		}
+		switch mt {
+		case proto.TInput:
+			_, _ = h.pty.Write(mp)
+		case proto.TResize:
+			if cols, rows, ok := proto.DecodeResize(mp); ok && cols > 0 && rows > 0 {
+				h.mu.Lock()
+				h.lastW, h.lastH = cols, rows
+				h.mu.Unlock()
+				_ = h.pty.Resize(cols, rows)
+			}
+		case proto.TKill:
+			if h.cmd != nil && h.cmd.Process != nil {
+				_ = h.cmd.Process.Kill()
+			}
+		}
+	}
+
+	h.mu.Lock()
+	delete(h.clients, cl)
+	h.mu.Unlock()
+}
