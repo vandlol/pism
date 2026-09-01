@@ -31,13 +31,14 @@ func Launch(cwd, piCmd string, extraArgs []string, readyTimeout time.Duration) (
 		return "", err
 	}
 	id := session.NewID()
+	name := session.GenerateName(session.TakenNames())
 
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
 
-	argv := []string{"__holder", "--id", id, "--cwd", cwd, "--pi", piCmd}
+	argv := []string{"__holder", "--id", id, "--name", name, "--cwd", cwd, "--pi", piCmd}
 	if len(extraArgs) > 0 {
 		argv = append(argv, "--")
 		argv = append(argv, extraArgs...)

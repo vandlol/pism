@@ -235,6 +235,50 @@ func parseAllHostsFlags(args []string) allHostsSel {
 	return sel
 }
 
+// cmdRename assigns a new human-recognizable name to a session:
+//
+//	pism name <ref> <new-name>
+//
+// ref is any id/prefix/current-name. The new name must be a short, lowercase,
+// shell-safe token and must not collide with another session's name.
+func cmdRename(g globals, args []string) int {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: pism name <id|name> <new-name>")
+		return 2
+	}
+	ref, newName := args[0], strings.ToLower(args[1])
+	if !session.ValidName(newName) {
+		fmt.Fprintf(os.Stderr, "pism name: invalid name %q (use lowercase letters, digits, '-' or '_', ≤31 chars)\n", args[1])
+		return 2
+	}
+	m, err := session.Load(ref)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pism name:", err)
+		return 1
+	}
+	// Reject a collision with a different session's name.
+	if all, lerr := session.List(); lerr == nil {
+		for _, other := range all {
+			if other.ID != m.ID && strings.EqualFold(other.Name, newName) {
+				fmt.Fprintf(os.Stderr, "pism name: %q is already used by session %s\n", newName, shortID(other.ID))
+				return 1
+			}
+		}
+	}
+	old := m.Name
+	m.Name = newName
+	if err := m.Save(); err != nil {
+		fmt.Fprintln(os.Stderr, "pism name:", err)
+		return 1
+	}
+	if old == "" {
+		fmt.Fprintf(os.Stderr, "named %s -> %s\n", shortID(m.ID), newName)
+	} else {
+		fmt.Fprintf(os.Stderr, "renamed %s -> %s\n", old, newName)
+	}
+	return 0
+}
+
 // cmdAttachRemote attaches the LOCAL terminal to a session on a remote host by
 // spawning `pism __attach-proxy` there over ssh and running the attach frame
 // protocol end-to-end. Detach and switch keys are intercepted locally (unlike
@@ -314,11 +358,11 @@ func remoteAdjacentLive(opts remote.Options, curID string, dir int) string {
 	}
 	var live []string
 	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.SplitN(strings.TrimSpace(line), "\t", 5)
-		if len(f) < 5 || f[1] != "live" {
+		p, ok := parsePorcelainLine(line)
+		if !ok || p.state != "live" {
 			continue
 		}
-		live = append(live, f[0])
+		live = append(live, p.id)
 	}
 	if len(live) == 0 {
 		return curID
@@ -409,28 +453,54 @@ func cmdLsAll(g globals, args []string) int {
 }
 
 // parsePorcelain turns `pism ls --porcelain` output from one host into rows,
-// tagging each with host and truncating topics to topicLen for display.
+// tagging each with host and truncating topics to topicLen for display. The
+// porcelain line format is: id \t name \t state \t age \t dir \t topic.
 func parsePorcelain(host string, out []byte, topicLen int) []ui.MultiRow {
 	var rows []ui.MultiRow
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(line) == "" {
+		p, ok := parsePorcelainLine(line)
+		if !ok {
 			continue
 		}
-		f := strings.SplitN(line, "\t", 5)
-		if len(f) < 5 {
-			continue
-		}
-		secs, _ := strconv.Atoi(f[2])
 		rows = append(rows, ui.MultiRow{
 			Host:  host,
-			ID:    f[0],
-			State: f[1],
-			Age:   time.Duration(secs) * time.Second,
-			Dir:   f[3],
-			Topic: truncateRunes(f[4], topicLen),
+			ID:    p.id,
+			Name:  p.name,
+			State: p.state,
+			Age:   time.Duration(p.ageSecs) * time.Second,
+			Dir:   p.dir,
+			Topic: truncateRunes(p.topic, topicLen),
 		})
 	}
 	return rows
+}
+
+// porcelainRec is one parsed `ls --porcelain` record.
+type porcelainRec struct {
+	id, name, state string
+	ageSecs         int
+	dir, topic      string
+}
+
+// parsePorcelainLine parses one porcelain line, tolerating both the current
+// 6-field format (id name state age dir topic) and the legacy 5-field format
+// from older remotes (id state age dir topic, no name). Returns ok=false for
+// blank or malformed lines.
+func parsePorcelainLine(line string) (porcelainRec, bool) {
+	if strings.TrimSpace(line) == "" {
+		return porcelainRec{}, false
+	}
+	f := strings.Split(line, "\t")
+	switch {
+	case len(f) >= 6:
+		secs, _ := strconv.Atoi(f[3])
+		return porcelainRec{id: f[0], name: f[1], state: f[2], ageSecs: secs, dir: f[4], topic: strings.Join(f[5:], "\t")}, true
+	case len(f) == 5: // legacy: id state age dir topic
+		secs, _ := strconv.Atoi(f[2])
+		return porcelainRec{id: f[0], name: "", state: f[1], ageSecs: secs, dir: f[3], topic: f[4]}, true
+	default:
+		return porcelainRec{}, false
+	}
 }
 
 // truncateRunes shortens s to at most max runes, appending an ellipsis when cut.
@@ -847,7 +917,7 @@ const client_DefaultDetach = 0x1c // Ctrl-\
 // positional arg can be disambiguated from a host).
 func isCommand(tok string) bool {
 	switch tok {
-	case "new", "n", "ls", "list", "attach", "a", "kill", "k", "gc", "topic":
+	case "new", "n", "ls", "list", "attach", "a", "kill", "k", "gc", "topic", "name", "rename":
 		return true
 	}
 	return false
@@ -859,7 +929,7 @@ func isCommand(tok string) bool {
 // which respects that host's configured channel unless overridden by flags).
 func isRemotable(tok string) bool {
 	switch tok {
-	case "new", "n", "ls", "list", "attach", "a", "kill", "k", "gc", "topic",
+	case "new", "n", "ls", "list", "attach", "a", "kill", "k", "gc", "topic", "name", "rename",
 		"update", "self-update":
 		return true
 	}
@@ -923,7 +993,11 @@ COMMANDS
   attach <id> [--all]              Re-attach to a session (detach: Ctrl-\ ;
                                    switch sessions: Ctrl-Left / Ctrl-Right).
                                    --all: switch across every ssh-config host
+
+  <id> is an id-prefix OR a session's name (e.g. calm-otter). Each session
+  gets a memorable auto-assigned name; rename it with 'pism name'.
   kill <id> [id...]                Terminate session(s)
+  name <id> <new-name>             Rename a session (human-friendly label)
   gc                               Remove metadata for dead sessions
   topic <id>                       Print a session's topic (for scripts)
   config [key] [value]             Show all keys, or get/set (--list, --unset, --path)
@@ -966,6 +1040,8 @@ EXAMPLES
   pism srv update --pre            update pism on host 'srv' over ssh
   pism ls --all                    list sessions across local + every ssh host
   pism attach --all                attach + switch across hosts (Ctrl-Left/Right)
+  pism attach calm-otter           attach by name instead of id
+  pism name calm-otter api         rename a session to 'api'
   pism update --all                update every ssh-config host that has pism
   pism update --all --exclude ci-* update all hosts except those matching ci-*
   pism config --all update-channel unstable   set a config key on every host

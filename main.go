@@ -142,6 +142,8 @@ func run(argv []string) int {
 		return cmdGC(g)
 	case "topic":
 		return cmdTopic(g, args)
+	case "name", "rename":
+		return cmdRename(g, args)
 	default:
 		fmt.Fprintf(os.Stderr, "pism: unknown command %q\n", cmd)
 		usage()
@@ -174,13 +176,16 @@ func runAttachProxy(args []string) int {
 }
 
 func runHolder(args []string) int {
-	var id, cwd, pi string
+	var id, name, cwd, pi string
 	var extra []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--id":
 			i++
 			id = args[i]
+		case "--name":
+			i++
+			name = args[i]
 		case "--cwd":
 			i++
 			cwd = args[i]
@@ -196,7 +201,7 @@ func runHolder(args []string) int {
 		fmt.Fprintln(os.Stderr, "holder: missing --id/--pi")
 		return 2
 	}
-	if err := holder.Run(holder.Config{ID: id, Cwd: cwd, PiCmd: pi, ExtraArgs: extra}); err != nil {
+	if err := holder.Run(holder.Config{ID: id, Name: name, Cwd: cwd, PiCmd: pi, ExtraArgs: extra}); err != nil {
 		fmt.Fprintln(os.Stderr, "holder:", err)
 		return 1
 	}
@@ -251,11 +256,16 @@ func cmdNew(g globals, args []string) int {
 		}
 		return 1
 	}
+	name := id[:8]
+	if m, lerr := session.Load(id); lerr == nil && m.Name != "" {
+		name = m.Name
+	}
 	if detached {
-		fmt.Println(id)
+		fmt.Fprintf(os.Stderr, "[started %s]\n", name)
+		fmt.Println(id) // id to stdout for scripts
 		return 0
 	}
-	fmt.Fprintf(os.Stderr, "[attached %s — detach with %s]\n", id[:8], g.detachStr)
+	fmt.Fprintf(os.Stderr, "[attached %s — detach with %s]\n", name, g.detachStr)
 	return attachByID(g, id)
 }
 

@@ -19,16 +19,23 @@ const localHost = "local"
 // localHost means the session lives on this machine.
 type xtarget struct {
 	Host string
+	Name string
 	ID   string
 }
 
 func (t xtarget) isLocal() bool { return t.Host == "" || t.Host == localHost }
 
+// label is the human-facing identifier for a target: its name (falling back to
+// a short id), prefixed with the host when remote.
 func (t xtarget) label() string {
-	if t.isLocal() {
-		return shortID(t.ID)
+	id := t.Name
+	if id == "" {
+		id = shortID(t.ID)
 	}
-	return t.Host + ":" + shortID(t.ID)
+	if t.isLocal() {
+		return id
+	}
+	return t.Host + ":" + id
 }
 
 // buildUniverse enumerates the live sessions across the local machine and every
@@ -43,7 +50,7 @@ func buildUniverse(g globals, sel allHostsSel) []xtarget {
 	if rows, err := manager.Rows(g.topicLen); err == nil {
 		for _, r := range rows {
 			if r.Alive {
-				uni = append(uni, xtarget{Host: localHost, ID: r.Meta.ID})
+				uni = append(uni, xtarget{Host: localHost, Name: r.Meta.Name, ID: r.Meta.ID})
 			}
 		}
 	}
@@ -66,11 +73,11 @@ func buildUniverse(g globals, sel allHostsSel) []xtarget {
 			continue
 		}
 		for _, line := range strings.Split(string(res.Stdout), "\n") {
-			f := strings.SplitN(strings.TrimSpace(line), "\t", 5)
-			if len(f) < 5 || f[1] != "live" {
+			p, ok := parsePorcelainLine(line)
+			if !ok || p.state != "live" {
 				continue
 			}
-			uni = append(uni, xtarget{Host: res.Host, ID: f[0]})
+			uni = append(uni, xtarget{Host: res.Host, Name: p.name, ID: p.id})
 		}
 	}
 	return uni
