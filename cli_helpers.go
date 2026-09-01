@@ -10,8 +10,65 @@ import (
 	"time"
 
 	"github.com/vandlol/pism/internal/config"
+	"github.com/vandlol/pism/internal/remote"
+	"github.com/vandlol/pism/internal/session"
 	"github.com/vandlol/pism/internal/update"
 )
+
+// Raw install script URLs (served from the default branch on GitHub).
+const (
+	installShURL  = "https://raw.githubusercontent.com/vandlol/pism/main/scripts/install.sh"
+	installPs1URL = "https://raw.githubusercontent.com/vandlol/pism/main/scripts/install.ps1"
+)
+
+// runInstall bootstraps pism onto a remote host over ssh (auto-detecting the
+// remote OS). Used by both `pism <host> install` and `pism install <host>`.
+func runInstall(g globals, host string, args []string) int {
+	version := ""
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--version" && i+1 < len(args) {
+			version = args[i+1]
+			i++
+		}
+	}
+	if err := remote.Install(host, remote.ResolveConfig(g.sshConfig), installShURL, installPs1URL, version); err != nil {
+		fmt.Fprintln(os.Stderr, "pism install:", err)
+		return 1
+	}
+	return 0
+}
+
+// cmdLogs prints a session's holder log (verbose diagnostics land here).
+func cmdLogs(g globals, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: pism logs <id>")
+		return 2
+	}
+	m, err := session.Load(args[0])
+	path := ""
+	if err == nil {
+		path = session.LogPath(m.ID)
+	} else {
+		// allow dumping by a raw/full id even if metadata is already gone
+		path = session.LogPath(args[0])
+	}
+	b, rerr := os.ReadFile(path)
+	if rerr != nil {
+		fmt.Fprintf(os.Stderr, "pism logs: %v\n", rerr)
+		return 1
+	}
+	os.Stdout.Write(b)
+	return 0
+}
+
+// cmdInstall handles `pism install <host> [flags]`.
+func cmdInstall(g globals, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: pism install <host>   (or: pism <host> install)")
+		return 2
+	}
+	return runInstall(g, args[0], args[1:])
+}
 
 // applyConfig layers config-file values under the built-in defaults (command
 // line flags, parsed later, override these).
@@ -84,9 +141,9 @@ func cmdUpdate(args []string) int {
 				channel = args[i+1]
 				i++
 			}
-		case "--pre", "--unstable", "--dev", "--nightly":
+		case "--pre", "-pre", "--unstable", "-unstable", "--dev", "-dev", "--nightly", "-nightly":
 			channel = "unstable"
-		case "--stable":
+		case "--stable", "-stable":
 			channel = "stable"
 		}
 	}
@@ -107,7 +164,25 @@ func cmdConfig(args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism config:", err)
 	}
-	if len(args) == 0 || args[0] == "--list" || args[0] == "-l" {
+	if args == nil || len(args) == 0 {
+		// Show ALL known keys with their current value (or "unset") + help.
+		width := 0
+		for _, k := range config.Keys {
+			if len(k.Name) > width {
+				width = len(k.Name)
+			}
+		}
+		for _, k := range config.Keys {
+			val, ok := cfg.Get(k.Name)
+			if !ok {
+				val = "(unset)"
+			}
+			fmt.Printf("%-*s = %-10s  # %s\n", width, k.Name, val, k.Desc)
+		}
+		return 0
+	}
+	if args[0] == "--list" || args[0] == "-l" {
+		// git-style: only keys that are actually set
 		for _, kv := range cfg.All() {
 			fmt.Printf("%s=%s\n", kv[0], kv[1])
 		}
@@ -163,6 +238,11 @@ func extractGlobals(argv []string, g *globals) ([]string, error) {
 			rest = append(rest, argv[i:]...)
 			break
 		}
+		// -v / -vv / -vvv : verbosity by counting v's
+		if len(a) >= 2 && a[0] == '-' && a[1] == 'v' && strings.Trim(a, "-v") == "" {
+			g.verbosity = len(a) - 1
+			continue
+		}
 		key, inlineVal, hasInline := splitFlag(a)
 		var err error
 		val := inlineVal
@@ -202,6 +282,16 @@ func extractGlobals(argv []string, g *globals) ([]string, error) {
 			}
 			g.topicLen = n
 			g.setTopicLen = true
+		case "--verbose":
+			s, e := get(key)
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(s)
+			if e2 != nil {
+				return nil, fmt.Errorf("--verbose: %v", e2)
+			}
+			g.verbosity = n
 		case "--dist":
 			if g.dist, err = get(key); err != nil {
 				return nil, err
@@ -223,28 +313,94 @@ func splitFlag(a string) (key, val string, hasInline bool) {
 	return a, "", false
 }
 
-// parseDetach turns a human detach-key spec into a byte.
-// Accepts: "^\\" or "ctrl-\\" style (caret/ctrl + char), "none"/"off" (0),
-// a single literal char, or a decimal code.
-func parseDetach(s string) byte {
+// parseDetach turns a human detach-key spec into a byte sequence. An empty
+// result means "disabled". Accepts:
+//   - "none"/"off"/"disable"       -> disabled
+//   - "^\\" or "ctrl-\\"            -> control byte (caret/ctrl + char)
+//   - a decimal code (0-255)       -> that byte
+//   - a function-key name f1..f20  -> the terminal escape sequence for it
+//   - a raw escape spec (\x1b..., \e..., esc...) -> those literal bytes
+//   - a single literal char        -> that char
+//
+// Unrecognized specs fall back to the default and print a warning, so a typo
+// no longer silently leaves you on Ctrl-\ with no clue why.
+func parseDetach(s string) []byte {
 	s = strings.TrimSpace(s)
-	switch strings.ToLower(s) {
+	lower := strings.ToLower(s)
+	switch lower {
 	case "", "none", "off", "disable", "disabled":
-		return 0
+		return nil
+	}
+	if seq, ok := functionKeys[lower]; ok {
+		return []byte(seq)
+	}
+	if seq, ok := parseEscapeSpec(s); ok {
+		return seq
 	}
 	if n, err := strconv.Atoi(s); err == nil && n >= 0 && n < 256 {
-		return byte(n)
+		return []byte{byte(n)}
 	}
-	if strings.HasPrefix(strings.ToLower(s), "ctrl-") && len(s) == 6 {
-		return ctrlByte(s[5])
+	if strings.HasPrefix(lower, "ctrl-") && len(s) == 6 {
+		return []byte{ctrlByte(s[5])}
 	}
 	if strings.HasPrefix(s, "^") && len(s) == 2 {
-		return ctrlByte(s[1])
+		return []byte{ctrlByte(s[1])}
 	}
 	if len(s) == 1 {
-		return s[0]
+		return []byte{s[0]}
 	}
-	return client_DefaultDetach
+	fmt.Fprintf(os.Stderr, "pism: unrecognized detach-key %q; using default (Ctrl-\\)\n", s)
+	return []byte{client_DefaultDetach}
+}
+
+// functionKeys maps function-key names to the escape sequences terminals emit.
+// F1-F12 use the classic xterm sequences. F13-F20 use the Kitty keyboard
+// protocol CSI-u encoding (CSI <code> u), because that is what a modern
+// terminal (wezterm, kitty, foot, ghostty) actually emits for those keys once
+// the Kitty protocol is active. pi enables the Kitty protocol, and pism itself
+// pushes it on attach when the detach key is one of these (see client.Attach),
+// so F13-F20 are reliably encoded. The legacy xterm "shifted F1-F4" form
+// (\x1b[1;2P..S) is NOT emitted by these terminals and never matched.
+var functionKeys = map[string]string{
+	"f1": "\x1bOP", "f2": "\x1bOQ", "f3": "\x1bOR", "f4": "\x1bOS",
+	"f5": "\x1b[15~", "f6": "\x1b[17~", "f7": "\x1b[18~", "f8": "\x1b[19~",
+	"f9": "\x1b[20~", "f10": "\x1b[21~", "f11": "\x1b[23~", "f12": "\x1b[24~",
+	"f13": "\x1b[57376u", "f14": "\x1b[57377u", "f15": "\x1b[57378u", "f16": "\x1b[57379u",
+	"f17": "\x1b[57380u", "f18": "\x1b[57381u", "f19": "\x1b[57382u", "f20": "\x1b[57383u",
+}
+
+// parseEscapeSpec accepts a literal escape sequence written as text, so users
+// whose terminal emits something different can set the exact bytes. Understands
+// a leading \x1b, \e, \033, or the word "esc" as ESC (0x1b), plus \xNN hex
+// escapes anywhere in the string.
+func parseEscapeSpec(s string) ([]byte, bool) {
+	low := strings.ToLower(s)
+	var rest string
+	switch {
+	case strings.HasPrefix(low, "\\x1b"):
+		rest = s[4:]
+	case strings.HasPrefix(low, "\\033"):
+		rest = s[4:]
+	case strings.HasPrefix(low, "\\e"):
+		rest = s[2:]
+	case strings.HasPrefix(low, "esc"):
+		rest = s[3:]
+	default:
+		return nil, false
+	}
+	out := []byte{0x1b}
+	for i := 0; i < len(rest); {
+		if rest[i] == '\\' && i+4 <= len(rest) && (rest[i+1] == 'x' || rest[i+1] == 'X') {
+			if n, err := strconv.ParseUint(rest[i+2:i+4], 16, 8); err == nil {
+				out = append(out, byte(n))
+				i += 4
+				continue
+			}
+		}
+		out = append(out, rest[i])
+		i++
+	}
+	return out, true
 }
 
 // ctrlByte maps a printable char to its control code (e.g. '\\' -> 0x1c).
@@ -333,8 +489,11 @@ COMMANDS
   kill <id> [id...]                Terminate session(s)
   gc                               Remove metadata for dead sessions
   topic <id>                       Print a session's topic (for scripts)
-  config <key> [value]             Get/set config (--list, --unset <k>, --path)
+  config [key] [value]             Show all keys, or get/set (--list, --unset, --path)
   update [--pre|--stable]          Update pism in place (channel: stable|unstable)
+  install <host>                   Install pism on a remote host over ssh
+                                   (also: pism <host> install)
+  logs <id>                        Print a session's holder log (diagnostics)
   push <host> [dest]               Copy the matching pism binary to a host
   build-all                        Cross-compile binaries into ./dist
   version
@@ -345,9 +504,12 @@ FLAGS
                          ./ssh_config, ./.ssh/config or ./.pism/ssh_config;
                          else falls back to ssh's own ~/.ssh/config
   --pi <cmd>             Command used to launch pi (default: pi)
-  --detach-key <spec>    Detach key: ^\ , ctrl-o, a char, a code, or "none"
+  --detach-key <spec>    Detach key: ^\ , ctrl-o, f16, a char, a code,
+                         an escape seq (\x1b[29~), or "none"
   --topic-len <n>        Max topic width in ls (default: 40)
   --dist <dir>           Output/dir for build-all & push (default: dist)
+  -v / -vv / -vvv        Verbosity: info / debug / trace (holder logs land in
+                         the session log; see: pism logs <id>)
 
 EXAMPLES
   pism new ~/proj                  start + attach a session in ~/proj

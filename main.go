@@ -12,6 +12,7 @@ import (
 
 	"github.com/vandlol/pism/internal/client"
 	"github.com/vandlol/pism/internal/config"
+	"github.com/vandlol/pism/internal/dbg"
 	"github.com/vandlol/pism/internal/holder"
 	"github.com/vandlol/pism/internal/manager"
 	"github.com/vandlol/pism/internal/remote"
@@ -30,6 +31,7 @@ type globals struct {
 	topicLen  int
 
 	readyTimeout time.Duration
+	verbosity    int
 
 	setPi       bool
 	setDetach   bool
@@ -58,6 +60,7 @@ func run(argv []string) int {
 		fmt.Fprintln(os.Stderr, "pism:", err)
 		return 2
 	}
+	dbg.SetLevel(g.verbosity)
 	if len(rest) == 0 {
 		usage()
 		return 1
@@ -81,6 +84,11 @@ func run(argv []string) int {
 		return cmdConfig(args)
 	case "update", "self-update":
 		return cmdUpdate(args)
+	case "install":
+		// pism install <host> [flags]
+		return cmdInstall(g, args)
+	case "logs", "log":
+		return cmdLogs(g, args)
 	}
 
 	// Grammar: the first token is a HOST unless it is a known command.
@@ -94,6 +102,11 @@ func run(argv []string) int {
 			return 2
 		}
 		sub, subArgs := args[0], args[1:]
+		if sub == "install" {
+			// pism <host> install [flags] — bootstrap pism onto the host over
+			// ssh (the remote has no pism yet, so this is NOT forwarded).
+			return runInstall(g, host, subArgs)
+		}
 		if !isRemotable(sub) {
 			fmt.Fprintf(os.Stderr, "pism: %q cannot run on a remote host\n", sub)
 			return 2

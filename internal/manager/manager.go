@@ -94,7 +94,11 @@ func Kill(idOrPrefix string) error {
 	return nil
 }
 
-// GC removes metadata (and sockets) for holders that are no longer alive.
+// GC removes metadata (and sockets) for holders that are no longer alive,
+// and sweeps orphaned socket files left behind by holders that died without
+// a clean teardown. The socket dir is shared per-uid across every state dir,
+// so a dead socket whose endpoint no longer accepts connections is removed
+// regardless of which PISM_STATE_DIR spawned it.
 func GC() (int, error) {
 	metas, err := session.List()
 	if err != nil {
@@ -105,6 +109,17 @@ func GC() (int, error) {
 		if !Alive(m) {
 			m.Remove()
 			_ = os.Remove(session.LogPath(m.ID))
+			n++
+		}
+	}
+	// Sweep dead sockets: any endpoint we can't dial has no live holder.
+	for _, ep := range transport.ListEndpoints() {
+		c, derr := transport.Dial(ep)
+		if derr == nil {
+			_ = c.Close()
+			continue
+		}
+		if os.Remove(ep) == nil {
 			n++
 		}
 	}

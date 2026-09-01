@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"time"
 
+	"github.com/vandlol/pism/internal/dbg"
 	"github.com/vandlol/pism/internal/session"
 	"github.com/vandlol/pism/internal/transport"
 )
@@ -16,6 +18,14 @@ import (
 func Launch(cwd, piCmd string, extraArgs []string, readyTimeout time.Duration) (string, error) {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
+	}
+	// Pre-flight: make sure pi is actually installed here, so a missing pi gives
+	// a clear message instead of an opaque "holder exited (exit status 1)".
+	if path, err := exec.LookPath(piCmd); err != nil {
+		return "", fmt.Errorf("pi command %q not found on PATH \u2014 install pi (https://pi.dev), "+
+			"or point pism at it with --pi <path> or `pism config pi <path>`", piCmd)
+	} else {
+		dbg.Logf(2, "resolved pi: %s", path)
 	}
 	if _, err := session.EnsureSessionsDir(); err != nil {
 		return "", err
@@ -44,7 +54,12 @@ func Launch(cwd, piCmd string, extraArgs []string, readyTimeout time.Duration) (
 	cmd.Stdin = nil
 	cmd.Stdout = logf
 	cmd.Stderr = logf
+	// Propagate verbosity to the detached holder; its stderr is this log file.
+	cmd.Env = append(os.Environ(), "PISM_VERBOSITY="+strconv.Itoa(dbg.Level()))
 	cmd.SysProcAttr = detachAttr()
+	dbg.Logf(1, "launching holder %s (cwd=%s pi=%s)", id[:8], cwd, piCmd)
+	dbg.Logf(2, "holder argv: %v", argv)
+	dbg.Logf(2, "holder log: %s", session.LogPath(id))
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
@@ -62,11 +77,13 @@ func Launch(cwd, piCmd string, extraArgs []string, readyTimeout time.Duration) (
 		if _, err := session.Load(id); err == nil {
 			if c, err := transport.Dial(endpoint); err == nil {
 				c.Close()
+				dbg.Logf(1, "holder %s ready after %s", id[:8], time.Since(start).Round(time.Millisecond))
 				return id, nil
 			}
 		}
 		select {
 		case werr := <-exited:
+			dbg.Logf(1, "holder %s exited before ready: %v", id[:8], werr)
 			return id, fmt.Errorf("holder exited before becoming ready (%v); see %s", werr, session.LogPath(id))
 		default:
 		}
