@@ -57,7 +57,10 @@ func Run(cfg Config) error {
 	defer p.Close()
 
 	args := append([]string{"--session-id", cfg.ID}, cfg.ExtraArgs...)
-	c := p.Command(cfg.PiCmd, args...)
+	// On Windows, pi is often a .cmd/.ps1 shim that ConPTY can't exec directly;
+	// resolvePiCommand wraps such shims in their interpreter (no-op on Unix).
+	piName, piArgs := resolvePiCommand(cfg.PiCmd, args)
+	c := p.Command(piName, piArgs...)
 	c.Dir = cfg.Cwd
 	c.Env = append(os.Environ(), "PISM_SESSION="+cfg.ID)
 	if err := c.Start(); err != nil {
