@@ -19,6 +19,14 @@ func Launch(cwd, piCmd string, extraArgs []string, readyTimeout time.Duration) (
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
+	// Pre-flight: make sure pi is actually installed here, so a missing pi gives
+	// a clear message instead of an opaque "holder exited (exit status 1)".
+	if path, err := exec.LookPath(piCmd); err != nil {
+		return "", fmt.Errorf("pi command %q not found on PATH \u2014 install pi (https://pi.dev), "+
+			"or point pism at it with --pi <path> or `pism config pi <path>`", piCmd)
+	} else {
+		dbg.Logf(2, "resolved pi: %s", path)
+	}
 	if _, err := session.EnsureSessionsDir(); err != nil {
 		return "", err
 	}
