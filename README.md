@@ -99,6 +99,23 @@ Full details and every flag are in **[USAGE.md](USAGE.md)**.
 
 ---
 
+## Companion: see the session name *inside* pi
+
+pism names your sessions — [**pi-pism-frame**](https://github.com/vandlol/pi-pism-frame)
+puts that name where you can't miss it. It's a small [pi](https://pi.dev)
+extension that frames the session with a colored, named header, a status bar, and
+the terminal tab title, so while you're attached (or hopping between hosts) you
+always see *which* session you're in.
+
+```sh
+pi install npm:pi-pism-frame
+```
+
+Each session name maps to its own readable pastel, and the style is your choice
+(`/pism-frame`). It's optional and stays dormant until a session name is present.
+
+---
+
 ## Docs
 
 | Guide | What's inside |
@@ -106,6 +123,7 @@ Full details and every flag are in **[USAGE.md](USAGE.md)**.
 | **[INSTALL.md](INSTALL.md)** | Install, remote install, push a binary, build from source |
 | **[USAGE.md](USAGE.md)** | Every command & flag, SSH, config, self-update, how it works, troubleshooting |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | Branch model, release flow, versioning |
+| **[pi-pism-frame ↗](https://github.com/vandlol/pi-pism-frame)** | Companion pi extension: colored named header/bar/title per session |
 
 ---
 
