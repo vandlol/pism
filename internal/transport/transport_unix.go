@@ -47,3 +47,21 @@ func Dial(endpoint string) (net.Conn, error) {
 
 // Cleanup removes the endpoint file.
 func Cleanup(endpoint string) { _ = os.Remove(endpoint) }
+
+// ListEndpoints returns every socket path currently present in the shared
+// runtime dir. The dir is keyed by uid (not by state dir), so this surfaces
+// sockets leaked by holders started under any PISM_STATE_DIR.
+func ListEndpoints() []string {
+	entries, err := os.ReadDir(runtimeDir())
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".sock" {
+			continue
+		}
+		out = append(out, filepath.Join(runtimeDir(), e.Name()))
+	}
+	return out
+}

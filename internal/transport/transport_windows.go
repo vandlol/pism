@@ -49,3 +49,8 @@ func Dial(endpoint string) (net.Conn, error) {
 
 // Cleanup is a no-op on Windows (named pipes vanish with the last handle).
 func Cleanup(endpoint string) {}
+
+// ListEndpoints returns nil on Windows: named pipes are kernel objects that
+// disappear automatically when the owning holder exits, so there is nothing
+// to sweep.
+func ListEndpoints() []string { return nil }
