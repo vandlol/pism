@@ -79,6 +79,8 @@ Other install options (manual download, remote hosts, build from source) live in
   the previous/next live session without dropping to a shell.
 - **Remote over SSH** — put a host in front of any command: `pism srv ls`,
   `pism srv new ~/svc`, `pism srv attach 3f9a`. Uses your own ssh config & keys.
+- **One list, every host** — `pism ls --all` aggregates your local sessions and
+  every ssh-config host that has pism into a single host-tagged table.
 - **Fleet-wide updates** — `pism update --all` updates pism on every SSH host that
   has it; `pism config --all <key> <value>` sets config everywhere at once.
 - **Stays current** — `pism update` upgrades the binary in place, stable or

@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/vandlol/pism/internal/config"
+	"github.com/vandlol/pism/internal/manager"
 	"github.com/vandlol/pism/internal/remote"
 	"github.com/vandlol/pism/internal/session"
+	"github.com/vandlol/pism/internal/ui"
 	"github.com/vandlol/pism/internal/update"
 )
 
@@ -230,6 +232,117 @@ func parseAllHostsFlags(args []string) allHostsSel {
 		}
 	}
 	return sel
+}
+
+// cmdLsAll aggregates sessions from the local machine and every ssh-config host
+// that has pism into a single host-tagged table. Remote sessions are gathered
+// via `pism <host> ls --porcelain` (machine-readable) and merged with the local
+// list. Unreachable hosts or hosts without pism are noted on stderr and skipped.
+func cmdLsAll(g globals, args []string) int {
+	sel := parseAllHostsFlags(args)
+
+	var rows []ui.MultiRow
+
+	// Local sessions first.
+	if local, err := manager.Rows(g.topicLen); err == nil {
+		for _, r := range local {
+			state := "dead"
+			if r.Alive {
+				state = "live"
+			}
+			rows = append(rows, ui.MultiRow{
+				Host:  "local",
+				ID:    r.Meta.ID,
+				State: state,
+				Topic: r.Topic,
+				Dir:   abbrevHome(r.Meta.Cwd),
+				Age:   r.Age,
+			})
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "pism ls: local:", err)
+	}
+
+	// Remote hosts.
+	results, err := remote.GatherAll(remote.RunAllOptions{
+		ConfigFile:     remote.ResolveConfig(g.sshConfig),
+		RemoteBin:      g.remoteBin,
+		Include:        sel.include,
+		Exclude:        sel.exclude,
+		Sub:            "ls",
+		Args:           []string{"--porcelain"},
+		ConnectTimeout: sel.timeout,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pism ls --all:", err)
+		// still render whatever local rows we have
+	}
+	for _, res := range results {
+		if res.Skipped {
+			fmt.Fprintf(os.Stderr, "  [%s] skip: %s\n", res.Host, res.Reason)
+			continue
+		}
+		if res.Err != nil {
+			fmt.Fprintf(os.Stderr, "  [%s] error: %v\n", res.Host, res.Err)
+			continue
+		}
+		rows = append(rows, parsePorcelain(res.Host, res.Stdout, g.topicLen)...)
+	}
+
+	ui.RenderMulti(os.Stdout, rows)
+	return 0
+}
+
+// parsePorcelain turns `pism ls --porcelain` output from one host into rows,
+// tagging each with host and truncating topics to topicLen for display.
+func parsePorcelain(host string, out []byte, topicLen int) []ui.MultiRow {
+	var rows []ui.MultiRow
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		f := strings.SplitN(line, "\t", 5)
+		if len(f) < 5 {
+			continue
+		}
+		secs, _ := strconv.Atoi(f[2])
+		rows = append(rows, ui.MultiRow{
+			Host:  host,
+			ID:    f[0],
+			State: f[1],
+			Age:   time.Duration(secs) * time.Second,
+			Dir:   f[3],
+			Topic: truncateRunes(f[4], topicLen),
+		})
+	}
+	return rows
+}
+
+// truncateRunes shortens s to at most max runes, appending an ellipsis when cut.
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		max = 40
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
+// abbrevHome replaces a leading $HOME with ~ for compact local paths.
+func abbrevHome(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if strings.HasPrefix(p, home+string(os.PathSeparator)) {
+		return "~" + p[len(home):]
+	}
+	return p
 }
 
 // cmdUpdateHosts fans `pism update` out across ssh-config hosts. By default it
@@ -690,6 +803,8 @@ COMMANDS
   new [dir] [-d] [-w <dur>] [-- pi args]  Start a session (attaches unless -d;
                                           -w/--wait sets ready timeout, 0=forever)
   ls                               List sessions with their topic + liveness
+  ls --all [--include globs]       Aggregate sessions from every ssh-config host
+     [--exclude globs]             into one host-tagged table (local + remotes)
   attach <id>                      Re-attach to a session (detach: Ctrl-\ ;
                                    switch sessions: Ctrl-Left / Ctrl-Right)
   kill <id> [id...]                Terminate session(s)
@@ -733,6 +848,7 @@ EXAMPLES
   pism srv attach 3f9a             attach to a remote session on 'srv'
   pism srv new ~/svc               start a session on 'srv'
   pism srv update --pre            update pism on host 'srv' over ssh
+  pism ls --all                    list sessions across local + every ssh host
   pism update --all                update every ssh-config host that has pism
   pism update --all --exclude ci-* update all hosts except those matching ci-*
   pism config --all update-channel unstable   set a config key on every host

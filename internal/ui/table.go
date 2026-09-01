@@ -49,6 +49,80 @@ func Render(w io.Writer, rows []manager.Row) {
 	}
 }
 
+// RenderPorcelain writes one tab-separated line per session for machine
+// consumption (used by `pism ls --all` to aggregate across hosts). Fields:
+//
+//	id \t state \t age_seconds \t dir \t topic
+//
+// The id is the full session id (not shortened) so callers can attach to it.
+// Tabs/newlines in the topic are flattened to spaces to keep one record per
+// line.
+func RenderPorcelain(w io.Writer, rows []manager.Row) {
+	for _, r := range rows {
+		state := "dead"
+		if r.Alive {
+			state = "live"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
+			r.Meta.ID,
+			state,
+			int(r.Age.Seconds()),
+			abbrevHome(r.Meta.Cwd),
+			flatten(r.Topic),
+		)
+	}
+}
+
+// MultiRow is a host-tagged session row for the aggregated `ls --all` view.
+type MultiRow struct {
+	Host  string
+	ID    string // full id
+	State string // "live" | "dead"
+	Topic string
+	Dir   string
+	Age   time.Duration
+}
+
+// RenderMulti writes an aligned table of sessions across hosts, with a HOST
+// column. IDs are shortened for display just like the single-host table.
+func RenderMulti(w io.Writer, rows []MultiRow) {
+	if len(rows) == 0 {
+		fmt.Fprintln(w, "no sessions on any host. start one with:  pism new  (or: pism <host> new)")
+		return
+	}
+	headers := []string{"HOST", "ID", "S", "TOPIC", "DIR", "AGE"}
+	data := make([][]string, 0, len(rows))
+	for _, r := range rows {
+		data = append(data, []string{
+			r.Host,
+			shortID(r.ID),
+			r.State,
+			r.Topic,
+			r.Dir,
+			humanAge(r.Age),
+		})
+	}
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = len(h)
+	}
+	for _, row := range data {
+		for i, c := range row {
+			if n := len([]rune(c)); n > widths[i] {
+				widths[i] = n
+			}
+		}
+	}
+	printRow(w, headers, widths)
+	for _, row := range data {
+		printRow(w, row, widths)
+	}
+}
+
+func flatten(s string) string {
+	return strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(s)
+}
+
 func printRow(w io.Writer, cols []string, widths []int) {
 	var b strings.Builder
 	for i, c := range cols {
