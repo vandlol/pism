@@ -164,7 +164,25 @@ func cmdConfig(args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism config:", err)
 	}
-	if len(args) == 0 || args[0] == "--list" || args[0] == "-l" {
+	if args == nil || len(args) == 0 {
+		// Show ALL known keys with their current value (or "unset") + help.
+		width := 0
+		for _, k := range config.Keys {
+			if len(k.Name) > width {
+				width = len(k.Name)
+			}
+		}
+		for _, k := range config.Keys {
+			val, ok := cfg.Get(k.Name)
+			if !ok {
+				val = "(unset)"
+			}
+			fmt.Printf("%-*s = %-10s  # %s\n", width, k.Name, val, k.Desc)
+		}
+		return 0
+	}
+	if args[0] == "--list" || args[0] == "-l" {
+		// git-style: only keys that are actually set
 		for _, kv := range cfg.All() {
 			fmt.Printf("%s=%s\n", kv[0], kv[1])
 		}
@@ -405,7 +423,7 @@ COMMANDS
   kill <id> [id...]                Terminate session(s)
   gc                               Remove metadata for dead sessions
   topic <id>                       Print a session's topic (for scripts)
-  config <key> [value]             Get/set config (--list, --unset <k>, --path)
+  config [key] [value]             Show all keys, or get/set (--list, --unset, --path)
   update [--pre|--stable]          Update pism in place (channel: stable|unstable)
   install <host>                   Install pism on a remote host over ssh
                                    (also: pism <host> install)
