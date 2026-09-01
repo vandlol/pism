@@ -31,6 +31,7 @@ var Keys = []struct{ Name, Desc string }{
 	{"ssh-config", "ssh config file to pass as -F (default: auto/none)"},
 	{"update-url", "custom base URL for `pism update` (overrides channel)"},
 	{"update-channel", "update channel: stable|latest, or unstable|dev|nightly (pre-releases)"},
+	{"update-exclude", "hosts to always skip in `update --all` (comma/space globs)"},
 	{"ready-timeout", "how long `new` waits for pi to come up (e.g. 30s, 5m, 0=forever)"},
 }
 
