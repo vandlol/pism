@@ -4,6 +4,7 @@ package client
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 
 	"golang.org/x/term"
@@ -169,30 +170,77 @@ type Keys struct {
 	SwitchNext []byte
 }
 
-// Attach connects the current terminal to the given session until the user
-// presses the detach key (session keeps running), presses a switch key
-// (detach and signal the caller to move to an adjacent session), or pi exits.
+// handshake performs the client hello (token auth) on a freshly-dialed
+// connection and waits for the holder's acceptance. It is used by local
+// attaches and by the remote Proxy; a remote client attaching over an
+// already-handshook stream (AttachStream) skips it.
+func handshake(conn io.ReadWriter, token string) error {
+	if err := proto.WriteFrame(conn, proto.THello, []byte(token)); err != nil {
+		return err
+	}
+	t, payload, err := proto.ReadFrame(conn)
+	if err != nil {
+		return err
+	}
+	if t == proto.TError {
+		return fmt.Errorf("attach rejected: %s", string(payload))
+	}
+	if t != proto.THelloOK {
+		return fmt.Errorf("unexpected handshake reply %d", t)
+	}
+	return nil
+}
+
+// Attach connects the current terminal to a LOCAL session (dialing its holder
+// socket directly) until the user presses the detach key (session keeps
+// running), presses a switch key (detach and signal the caller to move to an
+// adjacent session), or pi exits.
 func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 	nc, err := transport.Dial(m.Endpoint)
 	if err != nil {
 		return OutcomeExit, fmt.Errorf("dial session: %w", err)
 	}
 	defer nc.Close()
-
-	if err := proto.WriteFrame(nc, proto.THello, []byte(m.Token)); err != nil {
+	if err := handshake(nc, m.Token); err != nil {
 		return OutcomeExit, err
 	}
-	t, payload, err := proto.ReadFrame(nc)
+	return runSession(nc, short(m.ID), keys)
+}
+
+// AttachStream connects the current terminal to a session reachable over an
+// already-established, already-handshook byte stream (e.g. an ssh pipe to a
+// remote Proxy). The frame protocol runs end-to-end between this client and the
+// remote holder; the proxy is a transparent byte pipe. label is used only for
+// the "[detached from …]" message.
+func AttachStream(conn io.ReadWriteCloser, label string, keys Keys) (Outcome, error) {
+	return runSession(conn, label, keys)
+}
+
+// Proxy bridges an already-connected client stream (in/out — typically an ssh
+// session's stdin/stdout) to a LOCAL holder socket: it dials the holder,
+// performs the token handshake, then copies raw frames in both directions until
+// either side closes. This is what runs on the remote host for a cross-host
+// attach; all key interception and terminal handling stay on the client.
+func Proxy(m *session.Meta, in io.Reader, out io.Writer) error {
+	nc, err := transport.Dial(m.Endpoint)
 	if err != nil {
-		return OutcomeExit, err
+		return fmt.Errorf("dial session: %w", err)
 	}
-	if t == proto.TError {
-		return OutcomeExit, fmt.Errorf("attach rejected: %s", string(payload))
+	defer nc.Close()
+	if err := handshake(nc, m.Token); err != nil {
+		return err
 	}
-	if t != proto.THelloOK {
-		return OutcomeExit, fmt.Errorf("unexpected handshake reply %d", t)
-	}
+	errc := make(chan error, 2)
+	go func() { _, e := io.Copy(nc, in); errc <- e }()  // client -> holder
+	go func() { _, e := io.Copy(out, nc); errc <- e }() // holder -> client
+	return <-errc
+}
 
+// runSession drives the interactive loop over conn (which must already be past
+// the holder handshake): stream terminal<->PTY, forward resizes, and intercept
+// the detach/switch keys. label names the session for teardown messages.
+func runSession(conn io.ReadWriteCloser, label string, keys Keys) (Outcome, error) {
+	nc := conn
 	in := int(os.Stdin.Fd())
 	restore, raw := enterRaw(in)
 	if raw {
@@ -329,7 +377,7 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 			restore()
 		}
 		if intent == OutcomeDetach {
-			fmt.Fprintf(os.Stderr, "[detached from %s]\r\n", short(m.ID))
+			fmt.Fprintf(os.Stderr, "[detached from %s]\r\n", label)
 		}
 		return intent, nil
 	}

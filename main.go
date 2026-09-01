@@ -23,8 +23,8 @@ import (
 var version = "dev" // overridden at build time via -ldflags "-X main.version=..."
 
 type globals struct {
-	host      string
-	remoteBin string
+	host       string
+	remoteBin  string
 	pi         string
 	detachStr  string
 	switchPrev string
@@ -50,6 +50,12 @@ func run(argv []string) int {
 	// __holder is the detached runtime; handle it before global parsing.
 	if len(argv) > 0 && argv[0] == "__holder" {
 		return runHolder(argv[1:])
+	}
+	// __attach-proxy is the remote half of a cross-host attach: it bridges this
+	// ssh session's stdio to a local holder socket. Handle it before global
+	// parsing (it takes only --id and speaks the raw frame protocol on stdio).
+	if len(argv) > 0 && argv[0] == "__attach-proxy" {
+		return runAttachProxy(argv[1:])
 	}
 
 	g := globals{pi: "pi", detachStr: "^\\", switchPrev: "ctrl-left", switchNext: "ctrl-right", topicLen: 40, dist: "dist", readyTimeout: 30 * time.Second}
@@ -110,6 +116,11 @@ func run(argv []string) int {
 			// ssh (the remote has no pism yet, so this is NOT forwarded).
 			return runInstall(g, host, subArgs)
 		}
+		if sub == "attach" || sub == "a" {
+			// Attach to a remote session from the LOCAL client via an ssh
+			// proxy, so detach/switch keys are handled here, not on the remote.
+			return cmdAttachRemote(g, host, subArgs)
+		}
 		if !isRemotable(sub) {
 			fmt.Fprintf(os.Stderr, "pism: %q cannot run on a remote host\n", sub)
 			return 2
@@ -136,6 +147,30 @@ func run(argv []string) int {
 		usage()
 		return 2
 	}
+}
+
+func runAttachProxy(args []string) int {
+	var id string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--id" && i+1 < len(args) {
+			i++
+			id = args[i]
+		}
+	}
+	if id == "" {
+		fmt.Fprintln(os.Stderr, "attach-proxy: missing --id")
+		return 2
+	}
+	m, err := session.Load(id)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "attach-proxy:", err)
+		return 1
+	}
+	if err := client.Proxy(m, os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "attach-proxy:", err)
+		return 1
+	}
+	return 0
 }
 
 func runHolder(args []string) int {
