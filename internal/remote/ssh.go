@@ -146,6 +146,37 @@ func Push(host, distDir, dest, cfg string) error {
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
+// ensureRemotePath appends ~/.local/bin to the remote shell rc files that
+// non-interactive ssh sessions read, idempotently. The script is fed to a
+// remote sh via stdin to avoid nested-quoting problems.
+func ensureRemotePath(cfg, host string) {
+	const script = "set -e\n" +
+		"dir=\"$HOME/.local/bin\"\n" +
+		"marker='# added by pism installer'\n" +
+		"ensure() {\n" +
+		"  f=\"$1\"\n" +
+		"  if [ ! -e \"$f\" ]; then case \"$f\" in *.zshenv) : ;; *) return 0 ;; esac; fi\n" +
+		"  if grep -qs \"$marker\" \"$f\" 2>/dev/null; then return 0; fi\n" +
+		"  { printf '\\n%s\\n' \"$marker\"; printf 'case \":$PATH:\" in *\":%s:\"*) ;; *) export PATH=\"%s:$PATH\" ;; esac\\n' \"$dir\" \"$dir\"; } >> \"$f\"\n" +
+		"  printf 'pism install: PATH configured in %s\\n' \"$f\" >&2\n" +
+		"}\n" +
+		"ensure \"$HOME/.zshenv\"\n" +
+		"ensure \"$HOME/.bashrc\"\n" +
+		"ensure \"$HOME/.profile\"\n"
+
+	c := exec.Command("ssh", append(configArgs(cfg), host, "sh", "-s")...)
+	c.Stdin = strings.NewReader(script)
+	c.Stdout, c.Stderr = os.Stderr, os.Stderr
+	_ = c.Run()
+	// Verify pism is now resolvable in a fresh non-interactive shell.
+	if out, err := exec.Command("ssh", append(configArgs(cfg), host, "command -v pism || true")...).Output(); err == nil {
+		if strings.TrimSpace(string(out)) == "" {
+			fmt.Fprintf(os.Stderr, "pism install: note \u2014 pism still not on the remote non-interactive PATH; use --remote-bin ~/.local/bin/pism if needed\n")
+		}
+	}
+}
+
+
 // Install bootstraps pism onto a remote host over ssh by running the published
 // installer for the detected OS. POSIX hosts get the shell installer via
 // curl|sh (wget fallback); Windows hosts get the PowerShell installer. It works
@@ -195,6 +226,10 @@ func Install(host, cfg, shURL, ps1URL, version string) error {
 		if err := ssh(false, remote).Run(); err != nil {
 			return fmt.Errorf("remote install failed: %w", err)
 		}
+		// Make ~/.local/bin resolvable for future non-interactive ssh commands
+		// (so `pism <host> ...` finds pism). zsh reads ~/.zshenv for every
+		// invocation; bash/sh get ~/.bashrc / ~/.profile when present.
+		ensureRemotePath(cfg, host)
 	default:
 		// Assume Windows: run the PowerShell installer.
 		fmt.Fprintf(os.Stderr, "pism install: assuming Windows on %s \u2014 running the PowerShell installer\n", host)
