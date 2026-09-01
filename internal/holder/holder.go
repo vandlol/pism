@@ -12,6 +12,7 @@ import (
 
 	"github.com/aymanbagabas/go-pty"
 
+	"github.com/vandlol/pism/internal/dbg"
 	"github.com/vandlol/pism/internal/proto"
 	"github.com/vandlol/pism/internal/session"
 	"github.com/vandlol/pism/internal/transport"
@@ -63,10 +64,15 @@ func Run(cfg Config) error {
 	c := p.Command(piName, piArgs...)
 	c.Dir = cfg.Cwd
 	c.Env = append(os.Environ(), "PISM_SESSION="+cfg.ID)
+	dbg.Logf(1, "holder %s: exec %q args=%v (cwd=%s)", cfg.ID[:8], piName, piArgs, cfg.Cwd)
 	if err := c.Start(); err != nil {
+		dbg.Logf(1, "holder %s: pi start FAILED: %v", cfg.ID[:8], err)
 		return err
 	}
 	h.cmd = c
+	if c.Process != nil {
+		dbg.Logf(1, "holder %s: pi started (pid=%d)", cfg.ID[:8], c.Process.Pid)
+	}
 	_ = p.Resize(h.lastW, h.lastH)
 
 	endpoint := transport.Endpoint(cfg.ID)
@@ -95,6 +101,7 @@ func Run(cfg Config) error {
 	go h.acceptLoop(l)
 	go h.readLoop()
 
+	dbg.Logf(2, "holder %s: listening on %s; waiting for pi to exit", cfg.ID[:8], endpoint)
 	code := 0
 	if werr := c.Wait(); werr != nil {
 		var ee *exec.ExitError
@@ -104,6 +111,7 @@ func Run(cfg Config) error {
 			code = 1
 		}
 	}
+	dbg.Logf(1, "holder %s: pi exited (code=%d)", cfg.ID[:8], code)
 
 	h.broadcast(proto.TExit, proto.EncodeExit(code))
 	time.Sleep(120 * time.Millisecond) // let clients flush the exit frame
@@ -116,13 +124,22 @@ func Run(cfg Config) error {
 // readLoop pumps pty output to the ring buffer and all attached clients.
 func (h *Holder) readLoop() {
 	buf := make([]byte, 32*1024)
+	total := 0
+	first := true
 	for {
 		n, err := h.pty.Read(buf)
 		if n > 0 {
+			if first {
+				dbg.Logf(2, "holder: first pty output (%d bytes)", n)
+				first = false
+			}
+			total += n
+			dbg.Logf(3, "pty read %d bytes (total %d)", n, total)
 			h.appendRing(buf[:n])
 			h.broadcast(proto.TOutput, buf[:n])
 		}
 		if err != nil {
+			dbg.Logf(2, "holder: pty read ended after %d bytes: %v", total, err)
 			return
 		}
 	}
