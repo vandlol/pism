@@ -48,7 +48,7 @@ locally; otherwise it's treated as an SSH target (any `user@host` or a
 pism ls                     # local
 pism srv ls                 # list sessions on host 'srv'
 pism srv new ~/svc          # start a session on 'srv'
-pism srv attach 3f9a        # attach to a remote session (live PTY over ssh -t)
+pism srv attach 3f9a        # attach to a remote session (local key handling)
 pism srv kill 3f9a          # kill a remote session
 pism srv update --pre       # update pism on host 'srv' over ssh
 ```
@@ -56,6 +56,14 @@ pism srv update --pre       # update pism on host 'srv' over ssh
 `pism <host> update` runs the remote's own `pism update`, so it respects that
 host's configured channel unless you override it with `--pre` / `--stable` /
 `--update-url`.
+
+**Remote attach handles keys locally.** `pism <host> attach <id>` runs a tiny
+proxy on the host (`pism __attach-proxy`) and streams the session's PTY back over
+ssh, so the frame protocol runs end-to-end between your terminal and the remote
+holder. That means **detach (`Ctrl-\`) and switching (`Ctrl-←/→`) are intercepted
+locally**, exactly like a local attach. Switching moves between live sessions
+*on that same host* (resolved via the host's `ls --porcelain`). Omit the id
+(`pism <host> attach`) to let the remote pick its newest live session.
 
 **Fan out across every host at once** — both `pism update` and `pism config`
 take an `--all` flag that enumerates the hosts in your ssh config, probes each
@@ -117,8 +125,10 @@ tab-separated `id⇥state⇥age⇥dir⇥topic` format you can also script agains
 directly). Selection uses the same `--include`/`--exclude` globs as
 `update --all`.
 
-> This is a read-only view today — *attaching* to and *switching between* sessions
-> across hosts are the next steps on the roadmap.
+> `ls --all` is read-only. You can already *attach* to any host's session
+> (`pism <host> attach <id>`, with local key handling and same-host switching);
+> *switching across hosts* from within an attach (Mac ↔ Linux) is the next step
+> on the roadmap.
 
 Installing pism on a remote host (`pism srv install`) and pushing a local binary
 (`pism push srv`) are covered in [INSTALL.md](INSTALL.md#install-on-a-remote-host).

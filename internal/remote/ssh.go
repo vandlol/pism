@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -295,6 +296,54 @@ func RunAll(o RunAllOptions) (int, error) {
 	return rc, nil
 }
 
+// ProxyConn is a client-side handle to a remote holder reached over ssh: it
+// reads from the ssh process's stdout and writes to its stdin, so the pism
+// frame protocol runs end-to-end between the local client and the remote
+// holder (the remote runs `pism __attach-proxy`). Close tears down the pipes
+// and waits for ssh to exit.
+type ProxyConn struct {
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	cmd    *exec.Cmd
+}
+
+func (p *ProxyConn) Read(b []byte) (int, error)  { return p.stdout.Read(b) }
+func (p *ProxyConn) Write(b []byte) (int, error) { return p.stdin.Write(b) }
+
+func (p *ProxyConn) Close() error {
+	_ = p.stdin.Close()
+	_ = p.stdout.Close()
+	return p.cmd.Wait()
+}
+
+// AttachProxy starts `ssh [-F cfg] host <bin> __attach-proxy --id <id>` with
+// binary stdin/stdout pipes (no pty) and returns a ProxyConn the local client
+// can run the attach frame protocol over. ssh's stderr is inherited so remote
+// errors surface. The caller must Close the returned conn.
+func AttachProxy(o Options, id string) (*ProxyConn, error) {
+	bin := o.RemoteBin
+	if bin == "" {
+		bin = "pism"
+	}
+	sshArgs := configArgs(o.ConfigFile)
+	// No -t: we want a clean binary byte pipe, not a pty with escape handling.
+	sshArgs = append(sshArgs, o.Host, bin, "__attach-proxy", "--id", id)
+	cmd := exec.Command("ssh", sshArgs...)
+	cmd.Stderr = os.Stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &ProxyConn{stdin: stdin, stdout: stdout, cmd: cmd}, nil
+}
+
 // HostResult is the outcome of running a pism subcommand on one host as part
 // of a capture fan-out (GatherAll).
 type HostResult struct {
@@ -349,6 +398,13 @@ func GatherAll(o RunAllOptions) ([]HostResult, error) {
 		results = append(results, HostResult{Host: h, Stdout: out, Err: rerr})
 	}
 	return results, nil
+}
+
+// Capture runs `ssh [-F cfg] host <bin> <args...>` and returns its stdout. It's
+// the exported single-host counterpart to GatherAll, used for quick queries
+// like fetching a host's `ls --porcelain` during cross-host switching.
+func Capture(o Options, timeout int, args []string) ([]byte, error) {
+	return capture(o.Host, o.ConfigFile, o.RemoteBin, timeout, args)
 }
 
 // capture runs `ssh [-F cfg] host <bin> <args...>` and returns its stdout.
@@ -417,14 +473,13 @@ func ensureRemotePath(cfg, host string) {
 	}
 }
 
-
 // Install bootstraps pism onto a remote host over ssh by running the published
 // installer for the detected OS. POSIX hosts get the shell installer via
 // curl|sh (wget fallback); Windows hosts get the PowerShell installer. It works
 // from any client OS (only the system ssh is used).
 //
-//   shURL/ps1URL  the raw install script URLs
-//   version       optional release tag to pin ("" = latest stable)
+//	shURL/ps1URL  the raw install script URLs
+//	version       optional release tag to pin ("" = latest stable)
 func Install(host, cfg, shURL, ps1URL, version string) error {
 	ssh := func(tty bool, a ...string) *exec.Cmd {
 		args := configArgs(cfg)

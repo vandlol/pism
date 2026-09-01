@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vandlol/pism/internal/client"
 	"github.com/vandlol/pism/internal/config"
 	"github.com/vandlol/pism/internal/manager"
 	"github.com/vandlol/pism/internal/remote"
@@ -232,6 +233,105 @@ func parseAllHostsFlags(args []string) allHostsSel {
 		}
 	}
 	return sel
+}
+
+// cmdAttachRemote attaches the LOCAL terminal to a session on a remote host by
+// spawning `pism __attach-proxy` there over ssh and running the attach frame
+// protocol end-to-end. Detach and switch keys are intercepted locally (unlike
+// the old forwarded `ssh -t host pism attach`, which handled keys remotely).
+// On a switch key it moves to the adjacent live session ON THE SAME HOST,
+// resolved via that host's `ls --porcelain`.
+func cmdAttachRemote(g globals, host string, args []string) int {
+	if len(args) == 0 {
+		// No id: let the remote pick the newest live session (legacy path).
+		g.host = host
+		return forward(g, "attach", args)
+	}
+	opts := remote.Options{Host: host, RemoteBin: g.remoteBin, ConfigFile: remote.ResolveConfig(g.sshConfig)}
+	keys := client.Keys{
+		Detach:     parseDetach(g.detachStr),
+		SwitchPrev: parseSwitch(g.switchPrev),
+		SwitchNext: parseSwitch(g.switchNext),
+	}
+	id := args[0]
+	for {
+		conn, err := remote.AttachProxy(opts, id)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "pism attach:", err)
+			return 1
+		}
+		outcome, aerr := client.AttachStream(conn, host+":"+shortID(id), keys)
+		_ = conn.Close()
+		if aerr != nil {
+			if ee, ok := aerr.(*client.ExitError); ok {
+				return ee.Code
+			}
+			fmt.Fprintln(os.Stderr, "pism attach:", aerr)
+			return 1
+		}
+		dir := 0
+		switch outcome {
+		case client.OutcomeSwitchPrev:
+			dir = -1
+		case client.OutcomeSwitchNext:
+			dir = 1
+		default:
+			return 0
+		}
+		next := remoteAdjacentLive(opts, id, dir)
+		if next == id {
+			// Nothing else live on this host; re-attach to the same session.
+			continue
+		}
+		id = next
+		fmt.Fprintf(os.Stderr, "[switching to %s on %s]\r\n", shortID(id), host)
+	}
+}
+
+// remoteAdjacentLive returns the id of the live session adjacent (dir=+1 next,
+// -1 prev, newest-first with wraparound) to curID on host, by parsing that
+// host's `ls --porcelain`. Falls back to curID when the host can't be queried
+// or has no other live session.
+func remoteAdjacentLive(opts remote.Options, curID string, dir int) string {
+	out, err := remote.Capture(opts, 10, []string{"ls", "--porcelain"})
+	if err != nil {
+		return curID
+	}
+	var live []string
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.SplitN(strings.TrimSpace(line), "\t", 5)
+		if len(f) < 5 || f[1] != "live" {
+			continue
+		}
+		live = append(live, f[0])
+	}
+	if len(live) == 0 {
+		return curID
+	}
+	cur := -1
+	for i, x := range live {
+		if x == curID || strings.HasPrefix(x, curID) {
+			cur = i
+			break
+		}
+	}
+	if cur == -1 {
+		return live[0]
+	}
+	step := 1
+	if dir < 0 {
+		step = -1
+	}
+	n := len(live)
+	return live[((cur+step)%n+n)%n]
+}
+
+// shortID returns the first 8 chars of a session id for display.
+func shortID(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // cmdLsAll aggregates sessions from the local machine and every ssh-config host

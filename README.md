@@ -78,7 +78,8 @@ Other install options (manual download, remote hosts, build from source) live in
 - **Hop between sessions** — while attached, `Ctrl-←` / `Ctrl-→` jump straight to
   the previous/next live session without dropping to a shell.
 - **Remote over SSH** — put a host in front of any command: `pism srv ls`,
-  `pism srv new ~/svc`, `pism srv attach 3f9a`. Uses your own ssh config & keys.
+  `pism srv new ~/svc`, `pism srv attach 3f9a`. Uses your own ssh config & keys,
+  and detach/switch keys are handled locally just like an on-box session.
 - **One list, every host** — `pism ls --all` aggregates your local sessions and
   every ssh-config host that has pism into a single host-tagged table.
 - **Fleet-wide updates** — `pism update --all` updates pism on every SSH host that
