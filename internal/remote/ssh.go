@@ -8,6 +8,7 @@
 package remote
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -144,3 +145,70 @@ func Push(host, distDir, dest, cfg string) error {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// Install bootstraps pism onto a remote host over ssh by running the published
+// installer for the detected OS. POSIX hosts get the shell installer via
+// curl|sh (wget fallback); Windows hosts get the PowerShell installer. It works
+// from any client OS (only the system ssh is used).
+//
+//   shURL/ps1URL  the raw install script URLs
+//   version       optional release tag to pin ("" = latest stable)
+func Install(host, cfg, shURL, ps1URL, version string) error {
+	ssh := func(tty bool, a ...string) *exec.Cmd {
+		args := configArgs(cfg)
+		if tty {
+			args = append(args, "-t")
+		}
+		c := exec.Command("ssh", append(args, append([]string{host}, a...)...)...)
+		c.Stdin = os.Stdin
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		return c
+	}
+
+	// Detect the remote OS. `uname -s` succeeds on Linux/macOS. On Windows it
+	// isn't found (the shell returns non-zero but ssh still CONNECTED). ssh's
+	// own errors (unreachable host, auth) use exit code 255 — distinguish those
+	// so we don't mistake an unreachable host for Windows.
+	detect := exec.Command("ssh", append(configArgs(cfg), host, "uname -s")...)
+	var dout, derr bytes.Buffer
+	detect.Stdout, detect.Stderr = &dout, &derr
+	runErr := detect.Run()
+	osName := strings.TrimSpace(dout.String())
+	if runErr != nil {
+		if ee, ok := runErr.(*exec.ExitError); ok && ee.ExitCode() == 255 {
+			return fmt.Errorf("cannot reach %s over ssh: %s", host, strings.TrimSpace(derr.String()))
+		}
+		// connected, but `uname` failed -> treat as Windows below
+	}
+
+	switch {
+	case osName == "Linux" || osName == "Darwin" || strings.Contains(osName, "BSD"):
+		fmt.Fprintf(os.Stderr, "pism install: %s detected on %s \u2014 running the shell installer\n", osName, host)
+		env := ""
+		if version != "" {
+			env = "PISM_VERSION=" + shellQuote(version) + " "
+		}
+		dl := "if command -v curl >/dev/null 2>&1; then curl -fsSL " + shellQuote(shURL) +
+			"; else wget -qO- " + shellQuote(shURL) + "; fi"
+		remote := env + "sh -c \"$(" + dl + ")\""
+		if err := ssh(false, remote).Run(); err != nil {
+			return fmt.Errorf("remote install failed: %w", err)
+		}
+	default:
+		// Assume Windows: run the PowerShell installer.
+		fmt.Fprintf(os.Stderr, "pism install: assuming Windows on %s \u2014 running the PowerShell installer\n", host)
+		setVer := ""
+		if version != "" {
+			setVer = "$env:PISM_VERSION='" + version + "'; "
+		}
+		ps := "powershell -NoProfile -ExecutionPolicy Bypass -Command \"" + setVer +
+			"irm " + ps1URL + " | iex\""
+		if err := ssh(false, ps).Run(); err != nil {
+			return fmt.Errorf("remote install failed (is this a Windows host with PowerShell + OpenSSH?): %w", err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "pism install: done. If the remote shell can't find pism, add its\n"+
+		"install dir to PATH (see the installer output), or use --remote-bin. Then:  pism %s ls\n", host)
+	return nil
+}

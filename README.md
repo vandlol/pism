@@ -131,15 +131,26 @@ it never handles credentials.
    `./.pism/ssh_config` in the current directory (auto-detected)
 4. otherwise ssh's own defaults (`~/.ssh/config`)
 
-**Push the binary to a POSIX host** (auto-detects its arch):
+**Install pism on a remote host** over ssh — detects the remote OS and runs the
+published installer (works from any client OS, to any host OS):
+
+```sh
+pism srv install         # or: pism install srv
+```
+
+- POSIX hosts (Linux/macOS): runs `install.sh` via `curl|sh` (wget fallback).
+- Windows hosts: runs `install.ps1` via PowerShell.
+- Pin a version with `--version <tag>`.
+
+Alternatively, **push a local binary** to a POSIX host (no download needed):
 
 ```sh
 pism build-all       # or: make dist
 pism push srv        # scp the matching binary to srv:~/.local/bin/pism
 ```
 
-For a Windows remote, copy `pism-windows-amd64.exe` over yourself and ensure it's
-on PATH.
+> After install, if the remote's non-interactive shell can't find `pism` (e.g.
+> `~/.local/bin` isn't on its `PATH`), add it there or use `--remote-bin`.
 
 ---
 
@@ -154,6 +165,7 @@ pism gc                               Drop metadata for dead sessions
 pism topic <id>                       Print a session's topic (for scripts)
 pism config <key> [value]             Get/set config (--list, --unset, --path)
 pism update                           Update pism in place from the update server
+pism <host> install                   Install pism on a remote host over ssh
 pism push <host> [dest]               Copy the matching binary to a host
 pism build-all                        Cross-compile binaries into ./dist
 pism version
