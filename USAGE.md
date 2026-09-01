@@ -125,10 +125,9 @@ tab-separated `id⇥state⇥age⇥dir⇥topic` format you can also script agains
 directly). Selection uses the same `--include`/`--exclude` globs as
 `update --all`.
 
-> `ls --all` is read-only. You can already *attach* to any host's session
-> (`pism <host> attach <id>`, with local key handling and same-host switching);
-> *switching across hosts* from within an attach (Mac ↔ Linux) is the next step
-> on the roadmap.
+> Want to *switch* between hosts, not just list them? See
+> [Switching sessions](#switching-sessions) — `pism attach --all` makes
+> `Ctrl-←/→` span every host.
 
 Installing pism on a remote host (`pism srv install`) and pushing a local binary
 (`pism push srv`) are covered in [INSTALL.md](INSTALL.md#install-on-a-remote-host).
@@ -203,8 +202,27 @@ shell:
 - **Ctrl-Left** → attach to the previous live session
 - **Ctrl-Right** → attach to the next live session
 
-Ordering is newest-first with wraparound, and dead sessions are skipped. The
-keys are configurable (per-attach or permanently), and accept named keys like
+Ordering is newest-first with wraparound, and dead sessions are skipped.
+
+**Switch across hosts too.** Add `--all` to an attach and the switch keys span
+*every* ssh-config host, not just the current machine — press `Ctrl-→` to hop
+from a local session straight into one running on your Mac or a Linux box:
+
+```sh
+pism attach --all                    # start on the newest live session anywhere
+pism attach 3f9a --all               # start on a specific session, switch across hosts
+pism mac attach 7c1d --all           # start on host 'mac', switch across hosts
+pism attach --all --include 'prod-*' # limit the universe to matching hosts
+```
+
+The universe is local-first, then ssh-config host order, newest-first within each
+host, wrapping around. It's rebuilt on every switch (a quick per-host
+`ls --porcelain` poll), so newly-created and newly-dead sessions are reflected;
+unreachable hosts are skipped. Crossing to a remote session opens it through the
+same [ssh proxy](#remote-hosts-over-ssh) as a remote attach, so keys stay local.
+Tip: enable ssh `ControlMaster`/`ControlPersist` to make each hop instant.
+
+The keys are configurable (per-attach or permanently), and accept named keys like
 `ctrl-left`/`alt-right`, function keys (`f16`), control chars (`ctrl-o`), raw
 escape sequences (`\x1b[1;5D`), or `none` to disable:
 

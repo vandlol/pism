@@ -76,7 +76,8 @@ Other install options (manual download, remote hosts, build from source) live in
 - **Detach & re-attach** — `Ctrl-\` drops out without stopping pi; re-attach any
   time. The detach key is configurable (or disable it entirely).
 - **Hop between sessions** — while attached, `Ctrl-←` / `Ctrl-→` jump straight to
-  the previous/next live session without dropping to a shell.
+  the previous/next live session without dropping to a shell. Add `--all`
+  (`pism attach --all`) and the hop spans **every host** — Mac ↔ Linux ↔ local.
 - **Remote over SSH** — put a host in front of any command: `pism srv ls`,
   `pism srv new ~/svc`, `pism srv attach 3f9a`. Uses your own ssh config & keys,
   and detach/switch keys are handled locally just like an on-box session.
