@@ -117,9 +117,9 @@ func cmdUpdate(args []string) int {
 				channel = args[i+1]
 				i++
 			}
-		case "--pre", "--unstable", "--dev", "--nightly":
+		case "--pre", "-pre", "--unstable", "-unstable", "--dev", "-dev", "--nightly", "-nightly":
 			channel = "unstable"
-		case "--stable":
+		case "--stable", "-stable":
 			channel = "stable"
 		}
 	}
