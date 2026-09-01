@@ -36,6 +36,19 @@ func TestParseSwitchUnknownDisables(t *testing.T) {
 	}
 }
 
+func TestUpdateIsRemotableButNotLocalCommand(t *testing.T) {
+	// `pism <host> update` must forward over ssh...
+	if !isRemotable("update") || !isRemotable("self-update") {
+		t.Fatal("update/self-update must be remotable so `pism <host> update` forwards")
+	}
+	// ...but update must NOT be a positional "command" (it's a meta command
+	// handled always-locally before host-grammar), else host disambiguation
+	// would treat a bare `pism update` host arg wrong.
+	if isCommand("update") || isCommand("self-update") {
+		t.Fatal("update/self-update must not be isCommand (handled as meta)")
+	}
+}
+
 func TestParseDetachNamedArrow(t *testing.T) {
 	// Named arrows are usable as a detach key too.
 	if got := parseDetach("ctrl-left"); !bytes.Equal(got, []byte("\x1b[1;5D")) {
