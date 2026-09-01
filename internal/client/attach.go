@@ -45,6 +45,20 @@ func Attach(m *session.Meta, detachKey []byte) error {
 	if raw {
 		defer restore()
 	}
+	// Safety net: whatever happens (clean detach, pi exit, or a panic), make
+	// sure we pop the Kitty keyboard protocol that the inner app pushed, so the
+	// user's terminal never gets wedged (Shift emitting escape codes). Cheap
+	// and idempotent — popping an empty Kitty stack is a no-op.
+	defer popKitty()
+
+	// NOTE: we deliberately do NOT push the Kitty keyboard protocol ourselves.
+	// pism is a transparent passthrough, not a translating multiplexer: if we
+	// enabled Kitty on the local terminal, every non-Kitty inner program (a
+	// bare shell, vim, less) would get CSI-u for Escape/Ctrl/Alt and break.
+	// Kitty-encoded detach keys (f13-f20) are matched only while the inner app
+	// (pi) has the protocol active — which is exactly the foreground use case.
+	// We still POP on teardown (resetTerm) so pi's push never leaks to the
+	// shell.
 
 	// All writes to the connection go through cw so goroutines don't interleave.
 	cw := proto.NewConnWriter(nc)
@@ -130,6 +144,23 @@ func Attach(m *session.Meta, detachKey []byte) error {
 	}
 }
 
+// kittyDrain pops the Kitty keyboard protocol off the terminal's stack several
+// times. pi (and other TUIs) push it (flags 7, incl. report-event-types) and
+// do NOT pop on a pism detach because they keep running, oblivious that we
+// left. If we don't pop, wezterm/kitty/foot are left in Kitty mode at the bare
+// shell and modifier keys (Shift!) start emitting escape codes instead of
+// typing. Popping an empty stack is a no-op, so over-draining is safe while
+// under-draining wedges the terminal.
+var kittyDrain = []byte("\x1b[<u\x1b[<u\x1b[<u\x1b[<u")
+
+// popKitty writes the Kitty drain directly (used as a defer safety net so an
+// abnormal exit path still restores the terminal).
+func popKitty() {
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		_, _ = os.Stdout.Write(kittyDrain)
+	}
+}
+
 // resetTerm returns the terminal to a sane state after a full-screen child.
 // It resets the scroll region and the modes a TUI commonly enables, shows the
 // cursor and resets attributes. When clear is true it also clears the screen
@@ -139,6 +170,7 @@ func resetTerm(clear bool) {
 		return
 	}
 	var b []byte
+	b = append(b, kittyDrain...)      // return input encoding to legacy (see popKitty)
 	b = append(b, "\x1b[r"...)        // reset scroll region (DECSTBM -> full)
 	b = append(b, "\x1b[?25h"...)     // show cursor
 	b = append(b, "\x1b[?2004l"...)   // bracketed paste off
