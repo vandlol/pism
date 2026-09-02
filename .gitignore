@@ -6,3 +6,7 @@
 # editor / OS cruft
 .DS_Store
 *.swp
+
+# local working notes / handover (never committed)
+HANDOVER.local.md
+*.local.md
