@@ -27,6 +27,18 @@ func Launch(cwd, piCmd string, extraArgs []string, readyTimeout time.Duration) (
 	} else {
 		dbg.Logf(2, "resolved pi: %s", path)
 	}
+	// Pre-flight: the working directory must exist on the host that runs pism.
+	// Without this check a missing dir surfaces only from the child's chdir, and
+	// because we set SysProcAttr (Setsid) Go skips its own clearer chdir check —
+	// the exec failure then reads `fork/exec <pism path>: no such file or
+	// directory`, naming the binary instead of the directory. That is easy to hit
+	// remotely: `pism <host> new ~/dir` expands `~` in the LOCAL shell, so the
+	// remote receives a client-only path.
+	if fi, err := os.Stat(cwd); err != nil {
+		return "", fmt.Errorf("working directory %q does not exist on this host \u2014 create it, or pass a path that exists where pism runs", cwd)
+	} else if !fi.IsDir() {
+		return "", fmt.Errorf("working directory %q is not a directory", cwd)
+	}
 	if _, err := session.EnsureSessionsDir(); err != nil {
 		return "", err
 	}
