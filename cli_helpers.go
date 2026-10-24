@@ -304,7 +304,7 @@ func cmdConfig(g globals, args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism config:", err)
 	}
-	if args == nil || len(args) == 0 {
+	if len(args) == 0 {
 		// Show ALL known keys with their current value (or "unset") + help.
 		width := 0
 		for _, k := range config.Keys {
@@ -647,7 +647,18 @@ func hasFlag(args []string, f string) bool {
 	return false
 }
 
-func absPath(p string) (string, error) { return filepath.Abs(p) }
+// absPath makes p absolute and expands a leading "~" against THIS host's home.
+// Over ssh the client shell usually expands `~/dir` before pism ever sees it, so
+// a literal tilde arrives only when the client quoted it (or has no shell, e.g.
+// Windows) — expanding it here keeps `pism <host> new '~/dir'` working.
+func absPath(p string) (string, error) {
+	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			p = filepath.Join(home, p[1:])
+		}
+	}
+	return filepath.Abs(p)
+}
 
 func cmdBuildAll(g globals, _ []string) int {
 	targets := [][2]string{
