@@ -10,6 +10,7 @@ import (
 
 	"github.com/vandlol/pism/internal/proto"
 	"github.com/vandlol/pism/internal/session"
+	"github.com/vandlol/pism/internal/termreset"
 	"github.com/vandlol/pism/internal/transport"
 )
 
@@ -198,18 +199,23 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 	if raw {
 		defer restore()
 	}
-	// Safety net: whatever happens (clean detach, pi exit, or a panic), make
-	// sure we reset the input protocols the inner app enabled (xterm
-	// modifyOtherKeys AND the Kitty keyboard stack) so the user's terminal
-	// never gets wedged (arrows/Shift+Tab/F-keys emitting escape codes). Cheap
-	// and idempotent.
-	defer popKitty()
+	// Clean slate before pi's first byte reaches this terminal: undo anything a
+	// previous attach left behind (mouse reporting and the alternate screen
+	// survive a dropped ssh connection, because the remote pty that would have
+	// reset them is gone).
+	resetTerm(false)
+
+	// Safety net: whatever happens (clean detach, pi exit, or a panic), the
+	// terminal gets restored, so it can never be left wedged — arrows/Shift+Tab/
+	// F-keys emitting escapes, or mouse moves printing CSI at the shell prompt.
+	// Cheap and idempotent; see internal/termreset for the full mode list.
+	defer resetTerm(false)
 
 	// Defers don't run when we're killed by a signal (SIGTERM/SIGHUP), so on
-	// those paths the modifyOtherKeys/Kitty leak would persist. Install a
-	// handler that restores the terminal and then dies with the default
-	// disposition, matching the clean-detach teardown.
-	stopSignals := installSignalRestore(func() {
+	// those paths the restore would be skipped. Install a handler that restores
+	// the terminal and then dies with the default disposition, matching the
+	// clean-detach teardown.
+	stopSignals := termreset.Supervise(func() {
 		resetTerm(true)
 		if raw {
 			restore()
@@ -335,63 +341,14 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 	}
 }
 
-// inputProtoReset returns a terminal's keyboard-input encoding to the legacy
-// state on EVERY pism teardown path (clean detach, pi exit, panic, signal).
+// resetTerm returns this terminal to a sane state after a full-screen child.
 //
-// The child (pi) may enable one of two independent "enhanced key" protocols and
-// then NEVER tear it down, because a pism detach leaves pi running, oblivious
-// that we left. Both must be undone or the bare shell is wedged (arrows,
-// Shift+Tab, F-keys and even Shift start emitting escape codes that only pi
-// parses):
-//
-//	\x1b[>4;0m   xterm modifyOtherKeys OFF. THE one that actually mattered:
-//	             byte-level capture proved pi took the modifyOtherKeys FALLBACK
-//	             (it couldn't negotiate the Kitty protocol against the holder's
-//	             headless pty), so \x1b[>4;2m was the sequence left dangling.
-//	             This is INVISIBLE to the Kitty query \x1b[?u (flags read 0),
-//	             so popping the Kitty stack alone never fixed it.
-//	\x1b[<u ×4   pop the Kitty keyboard stack, in case pi DID take the Kitty
-//	             path on a terminal that supports it. Over-popping an empty
-//	             stack is a harmless no-op.
-//
-// Both are safe to send unconditionally and cheap; we deliberately do NOT try
-// to detect which one is active, because the whole bug class is teardown paths
-// that get skipped.
-var inputProtoReset = []byte("\x1b[>4;0m\x1b[<u\x1b[<u\x1b[<u\x1b[<u")
-
-// popKitty writes the input-protocol reset directly (used as a defer safety net
-// so an abnormal exit path — including a panic — still restores the terminal).
-func popKitty() {
-	if term.IsTerminal(int(os.Stdout.Fd())) {
-		_, _ = os.Stdout.Write(inputProtoReset)
-	}
-}
-
-// resetTerm returns the terminal to a sane state after a full-screen child.
-// It resets the scroll region and the modes a TUI commonly enables, shows the
-// cursor and resets attributes. When clear is true it also clears the screen
-// (used on detach so no status-bar remnants remain).
-func resetTerm(clear bool) {
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		return
-	}
-	var b []byte
-	b = append(b, inputProtoReset...) // modifyOtherKeys off + Kitty pop (see popKitty)
-	b = append(b, "\x1b[r"...)        // reset scroll region (DECSTBM -> full)
-	b = append(b, "\x1b[?25h"...)     // show cursor
-	b = append(b, "\x1b[?2004l"...)   // bracketed paste off
-	b = append(b, "\x1b[?1000l"...)   // mouse tracking off
-	b = append(b, "\x1b[?1002l"...)
-	b = append(b, "\x1b[?1003l"...)
-	b = append(b, "\x1b[?1006l"...)
-	b = append(b, "\x1b[?2026l"...) // synchronized-update off
-	b = append(b, "\x1b[?1049l"...) // leave alternate screen (no-op if not set)
-	b = append(b, "\x1b[0m"...)     // reset attributes
-	if clear {
-		b = append(b, "\x1b[H\x1b[2J"...) // home + clear screen
-	}
-	_, _ = os.Stdout.Write(b)
-}
+// The byte-level detail — which DEC/ANSI modes are reset and why each one is on
+// the list — lives in internal/termreset, shared with the ssh-forwarding path
+// (`pism <host> attach`) so both processes that can own a terminal stay in sync
+// and no teardown path can silently fall behind. When clear is true the screen
+// is also cleared (used on detach so no status-bar remnants remain).
+func resetTerm(clear bool) { termreset.ResetStdout(clear) }
 
 // ExitError carries pi's exit code so the CLI can propagate it.
 type ExitError struct{ Code int }

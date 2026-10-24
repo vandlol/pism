@@ -31,6 +31,10 @@ type globals struct {
 	switchNext string
 	sshConfig  string
 	topicLen   int
+	// sshKeepAlive is the ServerAliveInterval (seconds) injected into forwarded
+	// ssh commands so a dead link is noticed in ~1 minute instead of minutes
+	// later. 0 disables the injection.
+	sshKeepAlive int
 
 	readyTimeout time.Duration
 	verbosity    int
@@ -52,7 +56,7 @@ func run(argv []string) int {
 		return runHolder(argv[1:])
 	}
 
-	g := globals{pi: "pi", detachStr: "^\\", switchPrev: "ctrl-left", switchNext: "ctrl-right", topicLen: 40, dist: "dist", readyTimeout: 30 * time.Second}
+	g := globals{pi: "pi", detachStr: "^\\", switchPrev: "ctrl-left", switchNext: "ctrl-right", topicLen: 40, dist: "dist", readyTimeout: 30 * time.Second, sshKeepAlive: remote.DefaultKeepalive}
 	// Load config (creates the file on first run) and apply it as defaults
 	// beneath any command-line flags.
 	if cfg, cerr := config.Load(); cerr == nil {
@@ -92,6 +96,8 @@ func run(argv []string) int {
 		return cmdInstall(g, args)
 	case "logs", "log":
 		return cmdLogs(g, args)
+	case "reset-term", "fixt":
+		return cmdResetTerm(g, args)
 	}
 
 	// Grammar: the first token is a HOST unless it is a known command.
@@ -364,6 +370,7 @@ func forward(g globals, cmd string, args []string) int {
 		RemoteBin:  g.remoteBin,
 		TTY:        tty,
 		ConfigFile: remote.ResolveConfig(g.sshConfig),
+		Keepalive:  g.sshKeepAlive,
 	}, fwd)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism:", err)

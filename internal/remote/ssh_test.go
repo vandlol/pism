@@ -73,3 +73,23 @@ func TestMatchesAny(t *testing.T) {
 		t.Error("empty patterns never match")
 	}
 }
+
+func TestKeepaliveArgs(t *testing.T) {
+	// The terminal-reset fix only fires once ssh actually exits; without
+	// keepalives a half-open link keeps ssh blocked for minutes.
+	if got := keepaliveArgs(0); got != nil {
+		t.Fatalf("keepaliveArgs(0) = %v; want nil (leave ssh's own config alone)", got)
+	}
+	if got := keepaliveArgs(-1); got != nil {
+		t.Fatalf("keepaliveArgs(-1) = %v; want nil", got)
+	}
+	got := keepaliveArgs(DefaultKeepalive)
+	want := []string{
+		"-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=4",
+		"-o", "TCPKeepAlive=yes",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("keepaliveArgs(%d) = %v; want %v", DefaultKeepalive, got, want)
+	}
+}

@@ -29,6 +29,7 @@ var Keys = []struct{ Name, Desc string }{
 	{"topic-len", "max topic width in ls (default: 40)"},
 	{"remote-bin", "pism path on remote hosts (default: pism)"},
 	{"ssh-config", "ssh config file to pass as -F (default: auto/none)"},
+	{"ssh-keepalive", "ssh ServerAliveInterval in seconds for forwarded commands; 0 = leave ssh's own config alone (default: 15)"},
 	{"update-url", "custom base URL for `pism update` (overrides channel)"},
 	{"update-channel", "update channel: stable|latest, or unstable|dev|nightly (pre-releases)"},
 	{"update-exclude", "hosts to always skip in `update --all` (comma/space globs)"},
@@ -141,6 +142,12 @@ func (c *Config) Set(key, val string) error {
 	if key == "topic-len" {
 		if _, err := strconv.Atoi(val); err != nil {
 			return fmt.Errorf("topic-len must be an integer: %v", err)
+		}
+	}
+	if key == "ssh-keepalive" {
+		n, err := strconv.Atoi(val)
+		if err != nil || n < 0 {
+			return fmt.Errorf("ssh-keepalive must be a non-negative integer (seconds): %q", val)
 		}
 	}
 	if key == "update-channel" {

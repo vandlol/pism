@@ -16,7 +16,18 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/vandlol/pism/internal/termreset"
 )
+
+// DefaultKeepalive is the default ServerAliveInterval (seconds) injected into
+// ssh invocations. Without it a half-open connection (wifi drop, laptop sleep,
+// NAT timeout) leaves ssh blocked on a dead socket for minutes, so the local
+// terminal stays dirty until the user notices and kills it by hand. With it,
+// ssh gives up in ~DefaultKeepalive*ServerAliveCountMax seconds, which is what
+// lets pism restore the terminal promptly. 0 disables the injection entirely
+// (ssh's own config then decides).
+const DefaultKeepalive = 15
 
 // Options controls how a command is forwarded.
 type Options struct {
@@ -24,6 +35,20 @@ type Options struct {
 	RemoteBin  string // pism path on the remote (default "pism")
 	TTY        bool   // allocate a pty (ssh -t) — required for attach
 	ConfigFile string // explicit ssh config file (-F); "" = ssh defaults
+	Keepalive  int    // ServerAliveInterval seconds; 0 = don't inject
+}
+
+// keepaliveArgs returns the -o flags that make ssh notice a dead link quickly.
+// ServerAliveCountMax=4 with a 15s interval means ~60s worst case.
+func keepaliveArgs(secs int) []string {
+	if secs <= 0 {
+		return nil
+	}
+	return []string{
+		"-o", fmt.Sprintf("ServerAliveInterval=%d", secs),
+		"-o", "ServerAliveCountMax=4",
+		"-o", "TCPKeepAlive=yes",
+	}
 }
 
 // localConfigCandidates are project-local ssh config paths, checked in order.
@@ -70,14 +95,19 @@ func configArgs(cfg string) []string {
 	return []string{"-F", cfg}
 }
 
-// Forward runs `ssh [-F cfg] [-t] host <remoteBin> <args...>` inheriting stdio
-// and returns the remote exit code.
+// Forward runs `ssh [-F cfg] [-o keepalive...] [-t] host <remoteBin> <args...>`
+// inheriting stdio and returns the remote exit code.
+//
+// On the TTY path pism owns the local terminal for the duration of the ssh
+// child, so it is also the only process that can restore it afterwards — see
+// restoreLocalTerminal.
 func Forward(o Options, args []string) (int, error) {
 	bin := o.RemoteBin
 	if bin == "" {
 		bin = "pism"
 	}
 	sshArgs := configArgs(o.ConfigFile)
+	sshArgs = append(sshArgs, keepaliveArgs(o.Keepalive)...)
 	if o.TTY {
 		sshArgs = append(sshArgs, "-t")
 	}
@@ -88,11 +118,30 @@ func Forward(o Options, args []string) (int, error) {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
+	// A clean slate before the remote app can enable anything, plus a guaranteed
+	// restore afterwards: ssh only restores termios (echo/canonical), it knows
+	// nothing about DEC private modes, so mouse reporting / the alternate screen
+	// that the remote app enabled in this terminal emulator would survive its
+	// exit — most visibly when the connection drops instead of exiting cleanly.
+	if o.TTY {
+		termreset.ResetStdout(false)
+		defer termreset.ResetStdout(false)
+		// Deferred restores don't run on SIGHUP/SIGTERM, so cover those too.
+		stopSignals := termreset.Supervise(func() { termreset.ResetStdout(false) })
+		defer stopSignals()
+	}
+
 	err := cmd.Run()
 	if err == nil {
 		return 0, nil
 	}
 	if ee, ok := err.(*exec.ExitError); ok {
+		if o.TTY && ee.ExitCode() == 255 {
+			// 255 is ssh's own failure (connection lost, auth, host key): the
+			// session on the other side keeps running, unlike a detach.
+			fmt.Fprintf(os.Stderr, "pism: connection to %s lost — the session is still running; re-attach with: pism %s attach\n", o.Host, o.Host)
+		}
 		return ee.ExitCode(), nil
 	}
 	return 1, err
@@ -231,6 +280,7 @@ type RunAllOptions struct {
 	Args           []string // args passed after the subcommand (e.g. --pre, or a config key/value)
 	ConnectTimeout int      // ssh ConnectTimeout seconds for the probe (0 = ssh default)
 	TTY            bool     // allocate a pty on each remote (unused for update/config)
+	Keepalive      int      // ServerAliveInterval seconds for the real command (0 = off)
 }
 
 // RunAll enumerates hosts from the ssh config, filters them by include/exclude,
@@ -281,7 +331,7 @@ func RunAll(o RunAllOptions) (int, error) {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "  [%s] %s…\n", h, o.Sub)
-		code, ferr := Forward(Options{Host: h, RemoteBin: o.RemoteBin, ConfigFile: o.ConfigFile, TTY: o.TTY},
+		code, ferr := Forward(Options{Host: h, RemoteBin: o.RemoteBin, ConfigFile: o.ConfigFile, TTY: o.TTY, Keepalive: o.Keepalive},
 			append([]string{o.Sub}, o.Args...))
 		if ferr != nil || code != 0 {
 			fmt.Fprintf(os.Stderr, "  [%s] %s FAILED (exit %d)\n", h, o.Sub, code)

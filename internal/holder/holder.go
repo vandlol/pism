@@ -72,7 +72,7 @@ func Run(cfg Config) error {
 	// later attaches, and a pism detach leaves pi running so pi never emits the
 	// matching disable. The client is therefore responsible for resetting BOTH
 	// modifyOtherKeys and the Kitty stack on every teardown path — see
-	// internal/client.inputProtoReset. Making pi negotiate Kitty here would
+	// internal/termreset.InputProtoReset. Making pi negotiate Kitty here would
 	// require lying about terminal capabilities before we know the client's
 	// terminal, which would corrupt non-Kitty terminals; the robust fix lives
 	// at teardown instead.

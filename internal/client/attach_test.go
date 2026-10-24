@@ -40,17 +40,6 @@ func TestDetachVariantsNonCSIuUnchanged(t *testing.T) {
 	}
 }
 
-func TestInputProtoResetDisablesModifyOtherKeys(t *testing.T) {
-	// The regression this guards: teardown must emit modifyOtherKeys-off, not
-	// just the Kitty pop. Without \x1b[>4;0m the terminal stays wedged.
-	if !bytes.Contains(inputProtoReset, []byte("\x1b[>4;0m")) {
-		t.Fatalf("inputProtoReset %q missing modifyOtherKeys-off \\x1b[>4;0m", inputProtoReset)
-	}
-	if !bytes.Contains(inputProtoReset, []byte("\x1b[<u")) {
-		t.Fatalf("inputProtoReset %q missing Kitty pop \\x1b[<u", inputProtoReset)
-	}
-}
-
 func TestMatchCSIuVariants(t *testing.T) {
 	code := []byte("57379") // F16
 	cases := []struct {

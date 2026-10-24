@@ -109,6 +109,8 @@ pism kill <id> [id...]                Terminate session(s)
 pism gc                               Drop metadata for dead sessions
 pism topic <id>                       Print a session's topic (for scripts)
 pism logs <id>                        Print a session's holder log (diagnostics)
+pism reset-term [--clear]             Repair a terminal left dirty by a dropped
+                                      connection (mouse escapes, alt screen)
 pism config <key> [value]             Get/set config (--list, --unset, --path)
 pism config --all <key> [value]       Get/set a key on every ssh-config host
 pism update [--pre|--stable]          Update pism in place from the update server
@@ -132,6 +134,8 @@ run remotely (e.g. `pism srv ls`, `pism srv update --pre`).
 --switch-next-key <spec>  switch to next session (default: ctrl-right)
 --topic-len <n>        max topic width in `ls` (default: 40)
 --ssh-config <path>    ssh config file to use (-F)
+--ssh-keepalive <secs> ssh ServerAliveInterval for forwarded commands
+                       (default 15; 0 = leave ssh's own config alone)
 --update-url <url>     custom base URL for `pism update` (overrides channel)
 --pre / --stable       one-off update channel for `pism update`
 --connect-timeout <n>  reachability-probe timeout for `--all` fan-out (default 10s)
@@ -199,7 +203,7 @@ pism config --unset pi             # remove
 pism config --path                 # print the file path
 ```
 
-**Keys:** `pi`, `detach-key`, `switch-prev-key`, `switch-next-key`, `topic-len`, `remote-bin`, `ssh-config`, `update-url`, `update-channel`, `update-exclude`, `ready-timeout`.
+**Keys:** `pi`, `detach-key`, `switch-prev-key`, `switch-next-key`, `topic-len`, `remote-bin`, `ssh-config`, `ssh-keepalive`, `update-url`, `update-channel`, `update-exclude`, `ready-timeout`.
 
 **Precedence:** command-line flag **>** config file **>** built-in default.
 Config is per-machine and is *not* pushed to remote hosts (each host reads its own).
@@ -309,6 +313,27 @@ sockets don't live there.
 **Attach shows a blank screen.** pism replays the recent buffer and resizes the PTY
 to trigger a repaint; if a full-screen app doesn't redraw, resize your terminal or
 press a key.
+
+**Terminal is full of escapes after the connection dropped** (mouse moves print
+`ESC[<35;20;5M`, arrows print junk, the prompt draws over pi's last frame).
+The app inside pi enabled mouse reporting / the alternate screen / enhanced key
+encodings on your terminal emulator. Those are DEC private modes, not termios, so
+the ssh client cannot undo them — and when the link dies, the remote pty that
+would have sent the "off" sequences is already gone.
+
+pism handles the paths where it owns your terminal: `pism <host> attach` restores
+it after ssh exits (plus `--ssh-keepalive` so a dead link is noticed in ~1 minute
+instead of minutes later), and every `pism attach` teardown resets the same set of
+modes. If you ssh'd in yourself and ran `pism attach` on the remote host, nothing
+on that side can reach your emulator — repair it locally:
+
+```sh
+pism reset-term           # turn off mouse/alt-screen/kitty, show the cursor
+pism reset-term --clear   # …and clear the screen
+```
+
+It is safe to run at any time; for the awkward cases, `pism reset-term` in your
+shell's `PROMPT_COMMAND` is a bigger hammer than it sounds.
 
 ---
 
