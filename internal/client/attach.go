@@ -359,10 +359,6 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 // that get skipped.
 var inputProtoReset = []byte("\x1b[>4;0m\x1b[<u\x1b[<u\x1b[<u\x1b[<u")
 
-// kittyDrain is retained as an alias for callers/tests referring to the Kitty
-// pop; the full reset now also disables modifyOtherKeys.
-var kittyDrain = inputProtoReset
-
 // popKitty writes the input-protocol reset directly (used as a defer safety net
 // so an abnormal exit path — including a panic — still restores the terminal).
 func popKitty() {
