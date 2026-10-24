@@ -23,8 +23,8 @@ import (
 var version = "dev" // overridden at build time via -ldflags "-X main.version=..."
 
 type globals struct {
-	host      string
-	remoteBin string
+	host       string
+	remoteBin  string
 	pi         string
 	detachStr  string
 	switchPrev string

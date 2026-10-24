@@ -395,14 +395,13 @@ func ensureRemotePath(cfg, host string) {
 	}
 }
 
-
 // Install bootstraps pism onto a remote host over ssh by running the published
 // installer for the detected OS. POSIX hosts get the shell installer via
 // curl|sh (wget fallback); Windows hosts get the PowerShell installer. It works
 // from any client OS (only the system ssh is used).
 //
-//   shURL/ps1URL  the raw install script URLs
-//   version       optional release tag to pin ("" = latest stable)
+//	shURL/ps1URL  the raw install script URLs
+//	version       optional release tag to pin ("" = latest stable)
 func Install(host, cfg, shURL, ps1URL, version string) error {
 	ssh := func(tty bool, a ...string) *exec.Cmd {
 		args := configArgs(cfg)
