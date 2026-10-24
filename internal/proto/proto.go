@@ -24,6 +24,12 @@ const (
 	TExit    byte = 11 // payload: [code:4] big-endian; child exited
 	THelloOK byte = 12 // payload: none; handshake accepted
 	TError   byte = 13 // payload: utf-8 error message
+	// TModeState carries the terminal-mode enable sequence the child app switched
+	// on (see internal/vtstate). The holder sends it on attach — before the ring
+	// snapshot, so a fullscreen app's replayed frames land in the alternate
+	// screen, and again after it, so the live state has the last word. The client
+	// writes the payload verbatim to its terminal.
+	TModeState byte = 14
 )
 
 const maxFrame = 8 << 20 // 8 MiB hard cap to avoid runaway allocs

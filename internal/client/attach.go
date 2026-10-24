@@ -253,6 +253,15 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 			switch mt {
 			case proto.TOutput:
 				_, _ = os.Stdout.Write(mp)
+			case proto.TModeState:
+				// Re-assert the modes the inner app switched on: mouse reporting,
+				// the alternate screen, autowrap-off, bracketed paste, its keyboard
+				// encoding. The app only sends those once, at startup, and our
+				// detach teardown switches them back off — so without this a
+				// re-attach would leave the terminal without them (pi would think
+				// the mouse was on while the terminal had it off, making pi's
+				// wheel-driven internal scrollback unreachable).
+				_, _ = os.Stdout.Write(mp)
 			case proto.TExit:
 				exitCode <- proto.DecodeExit(mp)
 				return
