@@ -121,6 +121,10 @@ func applyConfig(g *globals, cfg *config.Config) {
 		g.sshConfig = v
 	}
 	g.sshKeepAlive = cfg.GetInt("ssh-keepalive", g.sshKeepAlive)
+	g.reconnect = cfg.GetInt("reconnect", g.reconnect)
+	if v, ok := cfg.Get("reconnect-backoff"); ok {
+		g.reconnectBase = parseWait(v)
+	}
 	g.topicLen = cfg.GetInt("topic-len", g.topicLen)
 	if v, ok := cfg.Get("ready-timeout"); ok {
 		g.readyTimeout = parseWait(v)
@@ -443,6 +447,26 @@ func extractGlobals(argv []string, g *globals) ([]string, error) {
 				return nil, fmt.Errorf("--ssh-keepalive needs a non-negative integer (seconds)")
 			}
 			g.sshKeepAlive = n
+		case "--reconnect":
+			s, e := get(key)
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(s)
+			if e2 != nil || n < 0 {
+				return nil, fmt.Errorf("--reconnect needs a non-negative integer (attempts)")
+			}
+			g.reconnect = n
+		case "--no-reconnect":
+			g.reconnect = 1
+		case "--reconnect-backoff":
+			s, e := get(key)
+			if e != nil {
+				return nil, e
+			}
+			if g.reconnectBase = parseWait(s); g.reconnectBase <= 0 {
+				return nil, fmt.Errorf("--reconnect-backoff needs a duration (e.g. 1s)")
+			}
 		case "--pi":
 			if g.pi, err = get(key); err != nil {
 				return nil, err
@@ -773,6 +797,9 @@ FLAGS
                          else falls back to ssh's own ~/.ssh/config
   --ssh-keepalive <secs> ServerAliveInterval for forwarded commands (default 15;
                          0 leaves ssh's own config alone)
+  --reconnect <n>        attach attempts when the link drops (default 5; 1 = off)
+  --no-reconnect         shorthand for --reconnect 1
+  --reconnect-backoff <d> first reconnect delay, doubles to 20s (default 1s)
   --pi <cmd>             Command used to launch pi (default: pi)
   --detach-key <spec>    Detach key: ^\ , ctrl-o, f16, a char, a code,
                          an escape seq (\x1b[29~), or "none"

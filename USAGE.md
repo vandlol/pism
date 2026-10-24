@@ -82,6 +82,22 @@ pism config --all --include 'prod-*' pi /opt/homebrew/bin/pi
   `config` key/value.
 - `--connect-timeout <secs>` bounds the reachability probe (default 10).
 
+**Link drops don't end the session.** `pism <host> attach` (and `pism <host> new`)
+keep the ssh connection alive-aware: `ServerAliveInterval` notices a dead link in
+about a minute instead of minutes later, the terminal is restored immediately
+(no more mouse escapes at the prompt), and the attach then retries by itself with
+a jittered exponential backoff — `1s, 2s, 4s … capped at 20s`, 5 attempts by
+default. Only ssh's own failure (exit 255) is retried; a detach or a remote error
+still ends it:
+
+```sh
+pism config reconnect 3            # attempts (1 = no retry)
+pism config reconnect-backoff 500ms
+pism srv attach 3f9a --no-reconnect
+```
+
+Local attaches retry the same way when the holder socket isn't answering yet.
+
 pism shells out to your system `ssh`, using your existing config, keys and agent —
 it never handles credentials.
 
@@ -136,6 +152,9 @@ run remotely (e.g. `pism srv ls`, `pism srv update --pre`).
 --ssh-config <path>    ssh config file to use (-F)
 --ssh-keepalive <secs> ssh ServerAliveInterval for forwarded commands
                        (default 15; 0 = leave ssh's own config alone)
+--reconnect <n>        attach attempts when the link drops (default 5; 1 = off)
+--no-reconnect         shorthand for --reconnect 1
+--reconnect-backoff <d> first reconnect delay, doubling to 20s (default 1s)
 --update-url <url>     custom base URL for `pism update` (overrides channel)
 --pre / --stable       one-off update channel for `pism update`
 --connect-timeout <n>  reachability-probe timeout for `--all` fan-out (default 10s)
@@ -203,7 +222,7 @@ pism config --unset pi             # remove
 pism config --path                 # print the file path
 ```
 
-**Keys:** `pi`, `detach-key`, `switch-prev-key`, `switch-next-key`, `topic-len`, `remote-bin`, `ssh-config`, `ssh-keepalive`, `update-url`, `update-channel`, `update-exclude`, `ready-timeout`.
+**Keys:** `pi`, `detach-key`, `switch-prev-key`, `switch-next-key`, `topic-len`, `remote-bin`, `ssh-config`, `ssh-keepalive`, `reconnect`, `reconnect-backoff`, `update-url`, `update-channel`, `update-exclude`, `ready-timeout`.
 
 **Precedence:** command-line flag **>** config file **>** built-in default.
 Config is per-machine and is *not* pushed to remote hosts (each host reads its own).

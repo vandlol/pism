@@ -3,9 +3,12 @@ package client
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
+	"github.com/muesli/cancelreader"
 	"golang.org/x/term"
 
 	"github.com/vandlol/pism/internal/proto"
@@ -287,11 +290,27 @@ func Attach(m *session.Meta, keys Keys) (Outcome, error) {
 		{keyMatcher(keys.SwitchPrev), OutcomeSwitchPrev},
 		{keyMatcher(keys.SwitchNext), OutcomeSwitchNext},
 	}
+	// A blocking os.Stdin.Read never returns once the session is gone, so the
+	// reader below would stay parked for the life of the process — and every
+	// reconnect attempt would leave another reader behind, competing for the
+	// user's keystrokes. cancelreader makes the read interruptible (epoll on
+	// Linux, kqueue on the BSDs/macOS, console events on Windows, portable
+	// fallback elsewhere).
+	stdin := io.Reader(os.Stdin)
+	if cr, cerr := cancelreader.NewReader(os.Stdin); cerr == nil {
+		defer cr.Close()
+		defer cr.Cancel() // runs first (LIFO): unblock a parked Read, then close
+		stdin = cr
+	}
+
 	stopped := make(chan Outcome, 1)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			n, err := os.Stdin.Read(buf)
+			n, err := stdin.Read(buf)
+			if errors.Is(err, cancelreader.ErrCanceled) {
+				return
+			}
 			if n > 0 {
 				chunk := buf[:n]
 				// Find the earliest interceptor match across all bindings.
