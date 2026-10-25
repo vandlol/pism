@@ -11,12 +11,25 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/vandlol/pism/internal/termreset"
 )
+
+// DefaultKeepalive is the default ServerAliveInterval (seconds) injected into
+// ssh invocations. Without it a half-open connection (wifi drop, laptop sleep,
+// NAT timeout) leaves ssh blocked on a dead socket for minutes, so the local
+// terminal stays dirty until the user notices and kills it by hand. With it,
+// ssh gives up in ~DefaultKeepalive*ServerAliveCountMax seconds, which is what
+// lets pism restore the terminal promptly. 0 disables the injection entirely
+// (ssh's own config then decides).
+const DefaultKeepalive = 15
 
 // Options controls how a command is forwarded.
 type Options struct {
@@ -24,6 +37,21 @@ type Options struct {
 	RemoteBin  string // pism path on the remote (default "pism")
 	TTY        bool   // allocate a pty (ssh -t) — required for attach
 	ConfigFile string // explicit ssh config file (-F); "" = ssh defaults
+	Keepalive  int    // ServerAliveInterval seconds; 0 = don't inject
+	SSHBin     string // ssh executable (default "ssh"); tests point this at a stub
+}
+
+// keepaliveArgs returns the -o flags that make ssh notice a dead link quickly.
+// ServerAliveCountMax=4 with a 15s interval means ~60s worst case.
+func keepaliveArgs(secs int) []string {
+	if secs <= 0 {
+		return nil
+	}
+	return []string{
+		"-o", fmt.Sprintf("ServerAliveInterval=%d", secs),
+		"-o", "ServerAliveCountMax=4",
+		"-o", "TCPKeepAlive=yes",
+	}
 }
 
 // localConfigCandidates are project-local ssh config paths, checked in order.
@@ -70,24 +98,66 @@ func configArgs(cfg string) []string {
 	return []string{"-F", cfg}
 }
 
-// Forward runs `ssh [-F cfg] [-t] host <remoteBin> <args...>` inheriting stdio
-// and returns the remote exit code.
+// sshBin returns the ssh executable to run; SSHBin exists so tests can swap in
+// a stub that fails on cue.
+func sshBin(o Options) string {
+	if o.SSHBin != "" {
+		return o.SSHBin
+	}
+	return "ssh"
+}
+
+// Forward runs `ssh [-F cfg] [-o keepalive...] [-t] host <remoteBin> <args...>`
+// inheriting stdio and returns the remote exit code.
+//
+// On the TTY path pism owns the local terminal for the duration of the ssh
+// child, so it is also the only process that can restore it afterwards.
 func Forward(o Options, args []string) (int, error) {
+	code, err := forwardOnce(o, args)
+	if err != nil {
+		return code, err
+	}
+	if o.TTY && code == 255 {
+		// 255 is ssh's own failure (connection lost, auth, host key): the session
+		// on the other side keeps running, unlike a detach.
+		fmt.Fprintf(os.Stderr, "pism: connection to %s lost — the session is still running; re-attach with: pism %s attach\n", o.Host, o.Host)
+	}
+	return code, nil
+}
+
+// forwardOnce is a single ssh attempt: it owns the terminal (clean slate before,
+// guaranteed restore after) and reports ssh's exit code.
+func forwardOnce(o Options, args []string) (int, error) {
 	bin := o.RemoteBin
 	if bin == "" {
 		bin = "pism"
 	}
 	sshArgs := configArgs(o.ConfigFile)
+	sshArgs = append(sshArgs, keepaliveArgs(o.Keepalive)...)
 	if o.TTY {
 		sshArgs = append(sshArgs, "-t")
 	}
 	sshArgs = append(sshArgs, o.Host, bin)
 	sshArgs = append(sshArgs, args...)
 
-	cmd := exec.Command("ssh", sshArgs...)
+	cmd := exec.Command(sshBin(o), sshArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
+	// A clean slate before the remote app can enable anything, plus a guaranteed
+	// restore afterwards: ssh only restores termios (echo/canonical), it knows
+	// nothing about DEC private modes, so mouse reporting / the alternate screen
+	// that the remote app enabled in this terminal emulator would survive its
+	// exit — most visibly when the connection drops instead of exiting cleanly.
+	if o.TTY {
+		termreset.ResetStdout(false)
+		defer termreset.ResetStdout(false)
+		// Deferred restores don't run on SIGHUP/SIGTERM, so cover those too.
+		stopSignals := termreset.Supervise(func() { termreset.ResetStdout(false) })
+		defer stopSignals()
+	}
+
 	err := cmd.Run()
 	if err == nil {
 		return 0, nil
@@ -96,6 +166,110 @@ func Forward(o Options, args []string) (int, error) {
 		return ee.ExitCode(), nil
 	}
 	return 1, err
+}
+
+// FailureCode is ssh's own exit status (connection lost, auth failure, host key
+// mismatch). It is what a detach never returns, so it is the one code the attach
+// loop retries.
+const FailureCode = 255
+
+// Retry is the attach reconnect policy: at most Attempts tries, with an
+// exponential backoff starting at Base, capped at Max, and optionally jittered.
+//
+// WHY BOUNDED: the common failure is a 5–30 s blip (wifi handoff, VPN flap, lid
+// close), so a couple of retries turns "your session view died" into a hiccup.
+// Retrying forever would hide real failures (revoked key, changed host key) and
+// silently hammer a server with auth attempts.
+type Retry struct {
+	Attempts int           // total tries; <= 1 means a single try, no retry
+	Base     time.Duration // first backoff (default 1s)
+	Max      time.Duration // backoff cap (default 20s)
+	// Jitter post-processes a computed delay. nil means "full jitter": a random
+	// duration in [d/2, d], so a fleet of reconnecting clients doesn't sync up.
+	Jitter func(time.Duration) time.Duration
+}
+
+// DefaultBackoff and DefaultMaxBackoff are the built-in retry timings.
+const (
+	DefaultBackoff    = time.Second
+	DefaultMaxBackoff = 20 * time.Second
+)
+
+// tries normalises the attempt count.
+func (r Retry) tries() int {
+	if r.Attempts < 1 {
+		return 1
+	}
+	return r.Attempts
+}
+
+// Delay returns how long to wait after the given (1-based) failed attempt.
+func (r Retry) Delay(attempt int) time.Duration {
+	base := r.Base
+	if base <= 0 {
+		base = DefaultBackoff
+	}
+	limit := r.Max
+	if limit <= 0 {
+		limit = DefaultMaxBackoff
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := base
+	for i := 1; i < attempt && d < limit; i++ {
+		d *= 2
+	}
+	if d > limit || d <= 0 {
+		d = limit
+	}
+	if r.Jitter != nil {
+		return r.Jitter(d)
+	}
+	// Full jitter over the upper half, so the first retry stays snappy.
+	half := d / 2
+	if half <= 0 {
+		return d
+	}
+	return half + time.Duration(rand.Int63n(int64(half)+1)) //nolint:gosec // backoff jitter, not crypto
+}
+
+// AttemptEvent describes a failed attach attempt, for status reporting.
+type AttemptEvent struct {
+	Attempt int           // 1-based number of the attempt that just failed
+	Total   int           // attempt budget
+	Code    int           // exit code of the failed attempt
+	Delay   time.Duration // wait before the next attempt
+	Final   bool          // true when this was the last attempt
+}
+
+// ForwardTUI runs an attach command with retries: a dropped link reconnects by
+// itself instead of ending the user's view of a session that is still running.
+//
+// Only ssh's own failure code (255) is retried — a remote detach or a real remote
+// error is terminal. onAttempt (optional) is told about each failed attempt so
+// the caller can print progress; the terminal is already restored by then.
+func ForwardTUI(o Options, args []string, r Retry, onAttempt func(AttemptEvent)) (int, error) {
+	total := r.tries()
+	for attempt := 1; ; attempt++ {
+		code, err := forwardOnce(o, args)
+		if err != nil {
+			return code, err
+		}
+		if code != FailureCode || attempt >= total {
+			if code == FailureCode && o.TTY && total > 1 {
+				// Ran out of retries: say what happened in words, and how to get back.
+				fmt.Fprintf(os.Stderr, "pism: giving up on %s after %d attempt(s); if the session is still running: pism %s attach\n",
+					o.Host, attempt, o.Host)
+			}
+			return code, nil
+		}
+		delay := r.Delay(attempt)
+		if onAttempt != nil {
+			onAttempt(AttemptEvent{Attempt: attempt, Total: total, Code: code, Delay: delay, Final: false})
+		}
+		time.Sleep(delay)
+	}
 }
 
 // Push copies a matching-architecture pism binary to the remote host.
@@ -231,6 +405,7 @@ type RunAllOptions struct {
 	Args           []string // args passed after the subcommand (e.g. --pre, or a config key/value)
 	ConnectTimeout int      // ssh ConnectTimeout seconds for the probe (0 = ssh default)
 	TTY            bool     // allocate a pty on each remote (unused for update/config)
+	Keepalive      int      // ServerAliveInterval seconds for the real command (0 = off)
 }
 
 // RunAll enumerates hosts from the ssh config, filters them by include/exclude,
@@ -281,7 +456,7 @@ func RunAll(o RunAllOptions) (int, error) {
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "  [%s] %s…\n", h, o.Sub)
-		code, ferr := Forward(Options{Host: h, RemoteBin: o.RemoteBin, ConfigFile: o.ConfigFile, TTY: o.TTY},
+		code, ferr := Forward(Options{Host: h, RemoteBin: o.RemoteBin, ConfigFile: o.ConfigFile, TTY: o.TTY, Keepalive: o.Keepalive},
 			append([]string{o.Sub}, o.Args...))
 		if ferr != nil || code != 0 {
 			fmt.Fprintf(os.Stderr, "  [%s] %s FAILED (exit %d)\n", h, o.Sub, code)
@@ -345,14 +520,13 @@ func ensureRemotePath(cfg, host string) {
 	}
 }
 
-
 // Install bootstraps pism onto a remote host over ssh by running the published
 // installer for the detected OS. POSIX hosts get the shell installer via
 // curl|sh (wget fallback); Windows hosts get the PowerShell installer. It works
 // from any client OS (only the system ssh is used).
 //
-//   shURL/ps1URL  the raw install script URLs
-//   version       optional release tag to pin ("" = latest stable)
+//	shURL/ps1URL  the raw install script URLs
+//	version       optional release tag to pin ("" = latest stable)
 func Install(host, cfg, shURL, ps1URL, version string) error {
 	ssh := func(tty bool, a ...string) *exec.Cmd {
 		args := configArgs(cfg)

@@ -8,6 +8,7 @@ import (
 // StateDir is where pism keeps per-session metadata, sockets and logs.
 //   - Unix/macOS: $XDG_STATE_HOME/pism  (fallback ~/.local/state/pism)
 //   - Windows:    %LOCALAPPDATA%\pism
+//
 // Override with $PISM_STATE_DIR.
 func StateDir() string {
 	if d := os.Getenv("PISM_STATE_DIR"); d != "" {

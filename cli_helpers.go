@@ -12,6 +12,7 @@ import (
 	"github.com/vandlol/pism/internal/config"
 	"github.com/vandlol/pism/internal/remote"
 	"github.com/vandlol/pism/internal/session"
+	"github.com/vandlol/pism/internal/termreset"
 	"github.com/vandlol/pism/internal/update"
 )
 
@@ -61,6 +62,34 @@ func cmdLogs(g globals, args []string) int {
 	return 0
 }
 
+// cmdResetTerm restores the local terminal by printing the DEC/ANSI "turn that
+// off" sequence. It is the manual escape hatch for the one case pism cannot
+// automate: you ssh'd in yourself and ran `pism attach` on the remote host, so
+// the process owning your local terminal was your own ssh client — nothing on
+// the remote side can reset your emulator when the link drops.
+func cmdResetTerm(_ globals, args []string) int {
+	clear := false
+	for _, a := range args {
+		switch a {
+		case "-c", "--clear":
+			clear = true
+		case "-h", "--help":
+			fmt.Fprint(os.Stderr, "usage: pism reset-term [--clear]\n\n"+
+				"Emit the terminal restore sequence (mouse off, leave alternate screen,\n"+
+				"show cursor, reset key encodings) to stdout. No-op-safe to run always.\n")
+			return 0
+		default:
+			fmt.Fprintf(os.Stderr, "pism reset-term: unknown flag %q\n", a)
+			return 2
+		}
+	}
+	if err := termreset.Write(os.Stdout, clear); err != nil {
+		fmt.Fprintln(os.Stderr, "pism reset-term:", err)
+		return 1
+	}
+	return 0
+}
+
 // cmdInstall handles `pism install <host> [flags]`.
 func cmdInstall(g globals, args []string) int {
 	if len(args) == 0 {
@@ -90,6 +119,11 @@ func applyConfig(g *globals, cfg *config.Config) {
 	}
 	if v, ok := cfg.Get("ssh-config"); ok {
 		g.sshConfig = v
+	}
+	g.sshKeepAlive = cfg.GetInt("ssh-keepalive", g.sshKeepAlive)
+	g.reconnect = cfg.GetInt("reconnect", g.reconnect)
+	if v, ok := cfg.Get("reconnect-backoff"); ok {
+		g.reconnectBase = parseWait(v)
 	}
 	g.topicLen = cfg.GetInt("topic-len", g.topicLen)
 	if v, ok := cfg.Get("ready-timeout"); ok {
@@ -247,6 +281,7 @@ func cmdUpdateHosts(g globals, args []string) int {
 		Sub:            "update",
 		Args:           sel.passthrough,
 		ConnectTimeout: sel.timeout,
+		Keepalive:      g.sshKeepAlive,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism update:", err)
@@ -270,6 +305,7 @@ func cmdConfigHosts(g globals, args []string) int {
 		Sub:            "config",
 		Args:           sel.passthrough,
 		ConnectTimeout: sel.timeout,
+		Keepalive:      g.sshKeepAlive,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism config:", err)
@@ -400,6 +436,36 @@ func extractGlobals(argv []string, g *globals) ([]string, error) {
 		case "--ssh-config":
 			if g.sshConfig, err = get(key); err != nil {
 				return nil, err
+			}
+		case "--ssh-keepalive":
+			s, e := get(key)
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(s)
+			if e2 != nil || n < 0 {
+				return nil, fmt.Errorf("--ssh-keepalive needs a non-negative integer (seconds)")
+			}
+			g.sshKeepAlive = n
+		case "--reconnect":
+			s, e := get(key)
+			if e != nil {
+				return nil, e
+			}
+			n, e2 := strconv.Atoi(s)
+			if e2 != nil || n < 0 {
+				return nil, fmt.Errorf("--reconnect needs a non-negative integer (attempts)")
+			}
+			g.reconnect = n
+		case "--no-reconnect":
+			g.reconnect = 1
+		case "--reconnect-backoff":
+			s, e := get(key)
+			if e != nil {
+				return nil, e
+			}
+			if g.reconnectBase = parseWait(s); g.reconnectBase <= 0 {
+				return nil, fmt.Errorf("--reconnect-backoff needs a duration (e.g. 1s)")
 			}
 		case "--pi":
 			if g.pi, err = get(key); err != nil {
@@ -619,7 +685,8 @@ const client_DefaultDetach = 0x1c // Ctrl-\
 // positional arg can be disambiguated from a host).
 func isCommand(tok string) bool {
 	switch tok {
-	case "new", "n", "ls", "list", "attach", "a", "kill", "k", "gc", "topic":
+	case "new", "n", "ls", "list", "attach", "a", "kill", "k", "gc", "topic",
+		"reset-term":
 		return true
 	}
 	return false
@@ -706,6 +773,8 @@ COMMANDS
   kill <id> [id...]                Terminate session(s)
   gc                               Remove metadata for dead sessions
   topic <id>                       Print a session's topic (for scripts)
+  reset-term [--clear]             Repair a terminal left dirty by a dropped
+                                   connection (mouse escapes, alt screen)
   config [key] [value]             Show all keys, or get/set (--list, --unset, --path)
   config --all [key] [value]       Get/set a config key on every ssh-config host
                                    (same --include/--exclude selection as update)
@@ -726,6 +795,11 @@ FLAGS
   --ssh-config <path>    ssh config file to use (-F). Auto-detects a local
                          ./ssh_config, ./.ssh/config or ./.pism/ssh_config;
                          else falls back to ssh's own ~/.ssh/config
+  --ssh-keepalive <secs> ServerAliveInterval for forwarded commands (default 15;
+                         0 leaves ssh's own config alone)
+  --reconnect <n>        attach attempts when the link drops (default 5; 1 = off)
+  --no-reconnect         shorthand for --reconnect 1
+  --reconnect-backoff <d> first reconnect delay, doubles to 20s (default 1s)
   --pi <cmd>             Command used to launch pi (default: pi)
   --detach-key <spec>    Detach key: ^\ , ctrl-o, f16, a char, a code,
                          an escape seq (\x1b[29~), or "none"

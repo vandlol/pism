@@ -16,6 +16,7 @@ import (
 	"github.com/vandlol/pism/internal/proto"
 	"github.com/vandlol/pism/internal/session"
 	"github.com/vandlol/pism/internal/transport"
+	"github.com/vandlol/pism/internal/vtstate"
 )
 
 const ringMax = 256 * 1024 // replay buffer sent to newly-attached clients
@@ -39,6 +40,12 @@ type Holder struct {
 	mu      sync.Mutex
 	clients map[*client]struct{}
 	ring    []byte
+	// tracker follows the terminal modes the child app switched on, so they can
+	// be re-asserted on every attach. The app emits them once at startup and the
+	// ring below has usually forgotten them by the time you re-attach — which is
+	// why mouse reporting (and with it pi's internal scrollback) died on
+	// re-attach. Guarded by mu: written by the pty reader, read by attach.
+	tracker *vtstate.Tracker
 	lastW   int // last known cols
 	lastH   int // last known rows
 }
@@ -48,7 +55,7 @@ func Run(cfg Config) error {
 	if _, err := session.EnsureSessionsDir(); err != nil {
 		return err
 	}
-	h := &Holder{cfg: cfg, clients: map[*client]struct{}{}, lastW: 80, lastH: 24}
+	h := &Holder{cfg: cfg, clients: map[*client]struct{}{}, lastW: 80, lastH: 24, tracker: vtstate.New()}
 
 	p, err := pty.New()
 	if err != nil {
@@ -72,7 +79,7 @@ func Run(cfg Config) error {
 	// later attaches, and a pism detach leaves pi running so pi never emits the
 	// matching disable. The client is therefore responsible for resetting BOTH
 	// modifyOtherKeys and the Kitty stack on every teardown path — see
-	// internal/client.inputProtoReset. Making pi negotiate Kitty here would
+	// internal/termreset.InputProtoReset. Making pi negotiate Kitty here would
 	// require lying about terminal capabilities before we know the client's
 	// terminal, which would corrupt non-Kitty terminals; the robust fix lives
 	// at teardown instead.
@@ -127,6 +134,13 @@ func Run(cfg Config) error {
 		}
 	}
 	dbg.Logf(1, "holder %s: pi exited (code=%d)", cfg.ID[:8], code)
+	h.mu.Lock()
+	state := h.tracker.String()
+	h.mu.Unlock()
+	// If this shows modes the app never turned off, an attach that came after
+	// this session died would have needed the re-assert path — useful when
+	// diagnosing "the terminal is stuck after re-attach" reports.
+	dbg.Logf(1, "holder %s: terminal state at exit: %s", cfg.ID[:8], state)
 
 	h.broadcast(proto.TExit, proto.EncodeExit(code))
 	time.Sleep(120 * time.Millisecond) // let clients flush the exit frame
@@ -166,6 +180,9 @@ func (h *Holder) appendRing(b []byte) {
 	if len(h.ring) > ringMax {
 		h.ring = h.ring[len(h.ring)-ringMax:]
 	}
+	// Track modes on the same bytes, under the same lock: the tracker is read by
+	// whoever attaches, and a torn parse would re-assert a half-applied state.
+	h.tracker.Write(b)
 	h.mu.Unlock()
 }
 
@@ -207,11 +224,24 @@ func (h *Holder) handle(nc net.Conn) {
 	h.mu.Lock()
 	snap := make([]byte, len(h.ring))
 	copy(snap, h.ring)
+	// Re-assert the modes the app switched on BEFORE the snapshot, so a
+	// fullscreen app's replayed frames land in the alternate screen instead of
+	// smearing over the primary one.
+	pre := h.tracker.Preamble()
 	h.clients[cl] = struct{}{}
 	h.mu.Unlock()
 
+	if len(pre) > 0 {
+		_ = cw.Write(proto.TModeState, pre)
+	}
 	if len(snap) > 0 {
 		_ = cw.Write(proto.TOutput, snap)
+	}
+	if len(pre) > 0 {
+		// Send it again so the live state has the last word: the replayed window
+		// may itself contain mode changes, and only the tracker knows what the
+		// app believes right now.
+		_ = cw.Write(proto.TModeState, pre)
 	}
 
 	for {

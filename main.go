@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -23,14 +24,23 @@ import (
 var version = "dev" // overridden at build time via -ldflags "-X main.version=..."
 
 type globals struct {
-	host      string
-	remoteBin string
+	host       string
+	remoteBin  string
 	pi         string
 	detachStr  string
 	switchPrev string
 	switchNext string
 	sshConfig  string
 	topicLen   int
+	// sshKeepAlive is the ServerAliveInterval (seconds) injected into forwarded
+	// ssh commands so a dead link is noticed in ~1 minute instead of minutes
+	// later. 0 disables the injection.
+	sshKeepAlive int
+	// reconnect is how many attach attempts to make when the link drops (1 = no
+	// retry), and reconnectBase is the first backoff (doubling, capped in
+	// remote.Retry).
+	reconnect     int
+	reconnectBase time.Duration
 
 	readyTimeout time.Duration
 	verbosity    int
@@ -52,7 +62,7 @@ func run(argv []string) int {
 		return runHolder(argv[1:])
 	}
 
-	g := globals{pi: "pi", detachStr: "^\\", switchPrev: "ctrl-left", switchNext: "ctrl-right", topicLen: 40, dist: "dist", readyTimeout: 30 * time.Second}
+	g := globals{pi: "pi", detachStr: "^\\", switchPrev: "ctrl-left", switchNext: "ctrl-right", topicLen: 40, dist: "dist", readyTimeout: 30 * time.Second, sshKeepAlive: remote.DefaultKeepalive, reconnect: 5, reconnectBase: remote.DefaultBackoff}
 	// Load config (creates the file on first run) and apply it as defaults
 	// beneath any command-line flags.
 	if cfg, cerr := config.Load(); cerr == nil {
@@ -92,6 +102,8 @@ func run(argv []string) int {
 		return cmdInstall(g, args)
 	case "logs", "log":
 		return cmdLogs(g, args)
+	case "reset-term", "fixt":
+		return cmdResetTerm(g, args)
 	}
 
 	// Grammar: the first token is a HOST unless it is a known command.
@@ -259,7 +271,7 @@ func attachByID(g globals, idOrPrefix string) int {
 		SwitchNext: parseSwitch(g.switchNext),
 	}
 	for {
-		outcome, err := client.Attach(m, keys)
+		outcome, err := attachWithRetry(g, m, keys)
 		if err != nil {
 			if ee, ok := err.(*client.ExitError); ok {
 				return ee.Code
@@ -284,6 +296,41 @@ func attachByID(g globals, idOrPrefix string) int {
 		m = next
 		fmt.Fprintf(os.Stderr, "[switching to %s]\n", session.Topic(m.ID, m.Cwd, g.topicLen))
 	}
+}
+
+// attachWithRetry attaches to m, retrying only failures that look like an
+// accident (a holder socket not listening yet, a handshake cut short) with the
+// configured backoff. A rejected attach, a session exit and a detach are
+// answers, not accidents, and are returned as-is.
+func attachWithRetry(g globals, m *session.Meta, keys client.Keys) (client.Outcome, error) {
+	total := g.reconnect
+	if total < 1 {
+		total = 1
+	}
+	r := remote.Retry{Attempts: total, Base: g.reconnectBase}
+	for attempt := 1; ; attempt++ {
+		outcome, err := client.Attach(m, keys)
+		if err == nil || attempt >= total || !transientAttachErr(err) {
+			return outcome, err
+		}
+		delay := r.Delay(attempt)
+		fmt.Fprintf(os.Stderr, "pism: session %s not reachable (%v); retrying in %s (attempt %d/%d); Ctrl-C to stop\n",
+			session.Topic(m.ID, m.Cwd, g.topicLen), err, delay.Round(100*time.Millisecond), attempt, total)
+		time.Sleep(delay)
+	}
+}
+
+// transientAttachErr reports whether an attach error is worth another attempt.
+func transientAttachErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ee *client.ExitError
+	if errors.As(err, &ee) {
+		return false // the session really exited
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, "dial session:") || strings.HasPrefix(msg, "unexpected handshake reply")
 }
 
 func cmdKill(g globals, args []string) int {
@@ -359,12 +406,26 @@ func forward(g globals, cmd string, args []string) int {
 		fwd = append(fwd, "--topic-len", strconv.Itoa(g.topicLen))
 	}
 	tty := cmd == "attach" || (cmd == "new" && !hasFlag(args, "-d") && !hasFlag(args, "--detached"))
-	code, err := remote.Forward(remote.Options{
+	opts := remote.Options{
 		Host:       g.host,
 		RemoteBin:  g.remoteBin,
 		TTY:        tty,
 		ConfigFile: remote.ResolveConfig(g.sshConfig),
-	}, fwd)
+		Keepalive:  g.sshKeepAlive,
+	}
+	var code int
+	var err error
+	if tty {
+		// An attach survives a link blip: a dropped ssh reconnects by itself
+		// instead of ending the view of a session that is still running.
+		code, err = remote.ForwardTUI(opts, fwd, remote.Retry{Attempts: g.reconnect, Base: g.reconnectBase},
+			func(e remote.AttemptEvent) {
+				fmt.Fprintf(os.Stderr, "pism: connection to %s lost; reconnecting in %s (attempt %d/%d); Ctrl-C to stop\n",
+					g.host, e.Delay.Round(100*time.Millisecond), e.Attempt+1, e.Total)
+			})
+	} else {
+		code, err = remote.Forward(opts, fwd)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pism:", err)
 		return 1

@@ -13,13 +13,13 @@ import (
 
 // Meta is the on-disk descriptor for one live (or recently-live) session.
 type Meta struct {
-	ID       string    `json:"id"`        // == pi --session-id (uuid v4)
-	PID      int       `json:"pid"`       // holder process id
-	Cmd      string    `json:"cmd"`       // e.g. "pi"
-	Args     []string  `json:"args"`      // extra args passed to pi
-	Cwd      string    `json:"cwd"`       // working dir pi runs in
-	Endpoint string    `json:"endpoint"`  // unix socket path or \\.\pipe\ name
-	Token    string    `json:"token"`     // attach auth token (hex)
+	ID       string    `json:"id"`       // == pi --session-id (uuid v4)
+	PID      int       `json:"pid"`      // holder process id
+	Cmd      string    `json:"cmd"`      // e.g. "pi"
+	Args     []string  `json:"args"`     // extra args passed to pi
+	Cwd      string    `json:"cwd"`      // working dir pi runs in
+	Endpoint string    `json:"endpoint"` // unix socket path or \\.\pipe\ name
+	Token    string    `json:"token"`    // attach auth token (hex)
 	Created  time.Time `json:"created"`
 }
 
